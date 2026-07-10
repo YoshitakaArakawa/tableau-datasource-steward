@@ -1,4 +1,4 @@
-"""OAuth (PKCE) authentication helper for tableau-prep-architect skills.
+"""OAuth (PKCE) authentication helper for tableau-datasource-steward skills.
 
 Loads .env from the nearest ancestor directory, runs OAuth 2.0
 Authorization Code + PKCE flow against Tableau Cloud, injects the
@@ -46,8 +46,8 @@ except ImportError:
     sys.exit("ERROR: python-dotenv is required. Install with: pip install -r requirements.txt")
 
 
-CLIENT_TYPE = "tableau-prep-architect"
-USER_AGENT = "tableau-prep-architect/0.1 (python)"
+CLIENT_TYPE = "tableau-datasource-steward"
+USER_AGENT = "tableau-datasource-steward/0.1 (python)"
 DEFAULT_CALLBACK_PORT = 8765
 OAUTH_TIMEOUT_SECONDS = 300
 
@@ -257,7 +257,7 @@ def _run_oauth_flow(server_url: str, site_name: str, port: int) -> str:
         "redirect_uri": redirect_uri,
         "state": state,
         "device_id": device_id,
-        "device_name": "tableau-prep-architect (python)",
+        "device_name": "tableau-datasource-steward (python)",
         "target_site": site_name,
         "client_type": CLIENT_TYPE,
     }
