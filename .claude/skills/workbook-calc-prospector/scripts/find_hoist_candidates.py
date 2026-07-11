@@ -44,6 +44,11 @@ TABLE_CALC_FUNCS = (
     "RANK", "TOTAL", "SIZE", "PREVIOUS_VALUE",
 )
 
+# INCLUDE / EXCLUDE の LOD 式も view のディメンションで結果が変わる（view 文脈依存）ため
+# hoist 不可。FIXED とディメンション省略のテーブルスコープ LOD（{ MAX(...) } 等）は
+# 文脈非依存なので許容する。開き波括弧直後の INCLUDE/EXCLUDE キーワードで判定する。
+CONTEXT_LOD_RE = re.compile(r"\{\s*(?:INCLUDE|EXCLUDE)\b", re.IGNORECASE)
+
 DOWNSTREAM = """
 query($l:String!){
   publishedDatasources(filter:{luid:$l}){
@@ -84,6 +89,11 @@ def operands(formula: str) -> list[str]:
 def is_table_calc(formula: str) -> bool:
     up = formula.upper()
     return any(fn in up for fn in TABLE_CALC_FUNCS)
+
+
+def is_context_dependent_lod(formula: str) -> bool:
+    # INCLUDE / EXCLUDE LOD のみ hoist 不可。FIXED / テーブルスコープ LOD は許容。
+    return bool(CONTEXT_LOD_RE.search(formula))
 
 
 def main():
@@ -127,9 +137,12 @@ def main():
         ops = operands(norm)
         missing = [o for o in ops if o not in pds_fields]
         tablecalc = is_table_calc(norm)
+        ctx_lod = is_context_dependent_lod(norm)
         reasons = []
         if tablecalc:
             reasons.append("table-calc（view 文脈依存。PDS calc 化で意味が変わりうる）")
+        if ctx_lod:
+            reasons.append("INCLUDE/EXCLUDE LOD（view のディメンション依存。PDS calc 化で意味が変わりうる）")
         if missing:
             reasons.append(f"operand が PDS に不在: {missing}")
         candidates.append({
@@ -139,7 +152,7 @@ def main():
             "workbook_count": len(g["workbooks"]),
             "operands": ops,
             "wb_descriptions": sorted(g["wb_descriptions"]),  # 構造化 desc の機械抽出（推論なし）
-            "hoistable": not tablecalc and not missing,
+            "hoistable": not tablecalc and not ctx_lod and not missing,
             "reasons": reasons,
         })
 
