@@ -8,7 +8,7 @@ calc). Emits a change-set fragment compatible with datasource-augmenter (calcs[]
 
 Per group we also carry the structured WB-side descriptions (the calc's own
 `description` field) and the raw formula WITH comments, as extraction material
-for datasource-column-describer. We do NOT decide here whether a comment is a
+for datasource-describer. We do NOT decide here whether a comment is a
 description -- that semantic call is the describer's (ANALYZE layer) job.
 
 usage:
