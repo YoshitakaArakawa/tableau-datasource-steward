@@ -18,19 +18,22 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 進捗:
 - [ ] 対象 PDS の LUID を確認（無ければ `Tableau:list-datasources` で名前から特定）
-- [ ] `Tableau:get-datasource-metadata` を LUID で呼び、列の `name` / `dataType` / `role` / `defaultAggregation` / `description` を取得
-- [ ] `read_calcs.py --pds-luid <luid> --out calcs.json` を実行し既存 calc（formula / description）を取得
-- [ ] 2 つを統合し棚卸しレポートを書く：説明あり/なしの列、role、default-agg、既存 calc 一覧
-- [ ] メタデータ欠落（description 未設定の列、説明なし calc）を gap として明示
+- [ ] `Tableau:get-datasource-metadata` を LUID で呼び、列の `name` / `dataType` / `role` / `defaultAggregation` / `description`（**全文**）を取得
+- [ ] `read_calcs.py --pds-luid <luid> --out calcs.json` を実行し、既存 calc（formula / description）と **datasource description（grain）** を取得
+- [ ] 3 つを統合し棚卸しレポートを書く：datasource description（grain）の現在値、説明あり/なしの列（既存 desc は**全文**）、role、default-agg、既存 calc 一覧
+- [ ] メタデータ欠落（description 未設定の列・calc、grain 未設定）を gap として明示
 
 ## 出力
 
 棚卸しレポート（Markdown または JSON）に少なくとも次を含める:
-- 列一覧：name / dataType / role / defaultAggregation / description(有無)
-- 既存 calc 一覧：name / formula / description(有無)
-- gap：description が未設定の列・calc
+- **datasource description（grain）の現在値**（有無・全文）
+- 列一覧：name / dataType / role / defaultAggregation / **description（有無だけでなく既存 desc の全文）**
+- 既存 calc 一覧：name / formula / **description（全文）**
+- gap：description が未設定の列・calc、grain 未設定
 
-このレポートは `datasource-column-describer`（説明草案づくり）と `datasource-augmenter`（注入）の入力になる。
+既存 desc・grain を**全文**で出すのは、`datasource-describer` が「未設定を埋める」だけでなく「**既存 desc が現データに対して適切か検証する**」ためにも本レポートを使うため。inspector は事実（現在値）を提示するだけで、内容の妥当性判定はしない（判定は describer）。
+
+このレポートは `datasource-describer`（説明草案・既存 desc の検証）と `datasource-augmenter`（注入）の入力になる。
 
 ## 認証 / 依存
 
@@ -41,10 +44,11 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 | スクリプト | 役割 |
 |---|---|
-| `scripts/read_calcs.py` | Metadata API で既存 calculated field（formula / description）を取得し `calcs.json` に出力 |
+| `scripts/read_calcs.py` | Metadata API で既存 calculated field（formula / description）と datasource description（grain）を取得し `calcs.json` に出力 |
 
 ## 設計原則
 
 - 読取のみ。変更は augmenter に委譲
 - 列メタは MCP、既存 calc は GraphQL（MCP が calc を列挙しない制約への対応）
 - gap（未整備）を明示し、後段 Skill の作業対象を絞る
+- 既存 desc・grain は**全文を事実として出す**。内容が現データに対して適切かの判定はしない（検証は describer）。READ 層に推論を持ち込まない

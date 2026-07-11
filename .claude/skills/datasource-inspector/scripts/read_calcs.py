@@ -1,6 +1,7 @@
-"""Read existing calculated fields (and their descriptions) of a Published Data Source
-via the Metadata API. MCP get-datasource-metadata lists only physical columns, so
-existing datasource-level calcs must be read here.
+"""Read existing calculated fields (and their descriptions) plus the datasource
+description (grain) of a Published Data Source via the Metadata API. MCP
+get-datasource-metadata lists only physical columns and does not surface the
+datasource-level description, so both must be read here.
 
 usage:
     python read_calcs.py --pds-luid <luid> [--out calcs.json]
@@ -29,7 +30,7 @@ from metadata_api import graphql  # noqa: E402
 Q = """
 query($l:String!){
   publishedDatasources(filter:{luid:$l}){
-    name
+    name description
     fields{
       name __typename description
       ... on CalculatedField{ formula }
@@ -53,7 +54,9 @@ def main():
     calcs = [{"name": f["name"], "formula": f.get("formula"),
               "description": f.get("description")}
              for f in ds["fields"] if f["__typename"] == "CalculatedField"]
-    out = {"pds_name": ds["name"], "calc_count": len(calcs), "calcs": calcs}
+    out = {"pds_name": ds["name"],
+           "datasource_description": ds.get("description"),  # grain (may be None/empty)
+           "calc_count": len(calcs), "calcs": calcs}
     if args.out:
         Path(args.out).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print("RESULT_JSON:", json.dumps(out, ensure_ascii=False))
