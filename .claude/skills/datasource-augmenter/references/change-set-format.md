@@ -32,7 +32,7 @@ PDS オブジェクト自体の説明文。dbt の model description（「この
 { "datasource": { "description": "受注明細データソース。粒度は注文明細行（1 行 = 1 商品 × 1 注文）。" } }
 ```
 
-Overwrite でも publish 経路で送られるが、既定は CreateNew。空文字列は送らない（未設定扱い）。
+Overwrite でも publish 経路で送られるが、既定は CreateNew。空文字列は送らない（未設定扱い）。**Overwrite で `datasource.description` を省略した場合、スクリプトは既存 grain を読んで引き継ぐ**（消さない）。grain を意図的に変えたいときだけ明示指定する。
 
 ## `descriptions[]`
 
@@ -56,10 +56,10 @@ Overwrite でも publish 経路で送られるが、既定は CreateNew。空文
 
 - Tableau に新規（または上書き）PDS が publish される
 - `<out-dir>/`: `original.tdsx`（revert 用）/ `original.tds` / `edited.tds` / `edited.tdsx` / `verified.tdsx` / `verified.tds` / `result.json`
-- `result.json` / stdout `RESULT_JSON`: `published_luid` / `published_name` / `mode` / `roundtrip_checks`（desc・calc の survive）/ `calc_registered_graphql`（GraphQL での calc 登録確認）/ `datasource_description_check`（grain の再 query 一致）/ `verified`
+- `result.json` / stdout `RESULT_JSON`: `published_luid` / `published_name` / `mode` / `roundtrip_checks`（desc・calc の survive）/ `calc_registered_graphql`（GraphQL での calc 登録確認）/ `coverage`（物理列の desc カバレッジ：`regular_columns` / `described` / `undescribed` / `undescribed_columns`）/ `datasource_description_check`（grain の再 query 一致）/ `verified`
 
 ## hoist 由来 calc の注意
 
 `workbook-calc-prospector` が出した hoist 候補をそのまま calcs に流す場合、**table calc（WINDOW_*, INDEX, LOOKUP, RUNNING_* 等）は PDS 側 calc としては意味が変わりうる**ため、prospector 側で除外・警告済みであることを前提とする。operand が source PDS に存在しない calc は publish 時に formula エラーになる。
 
-`datasource-column-describer` が付ける provenance フィールド（`source` = `extracted` | `inferred`、`conflict`、`variants`）が calcs / descriptions の要素に含まれることがある。これらは orchestrator 報告用の注記で、**augmenter は上記の定義済みキーのみ参照しスキップする**ため、change-set にそのまま残してよい。
+`datasource-describer` が付ける provenance フィールド（`source` = `extracted` | `inferred`、`conflict`、`variants`、`previous_text`）や、トップレベルの `audits[]` / `skipped[]`（既存 desc の検証結果・記述をスキップした列の記録）が change-set に含まれることがある。これらは orchestrator 報告用の注記で、**augmenter は上記の定義済みキーのみ参照しスキップする**ため、change-set にそのまま残してよい。

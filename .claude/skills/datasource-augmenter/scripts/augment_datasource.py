@@ -21,6 +21,7 @@ import html
 import json
 import re
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -233,11 +234,20 @@ def main():
             project_id = src.project_id  # inherit source project
 
         item = TSC.DatasourceItem(project_id)
-        item.name = new_name if mode == "CreateNew" else server.datasources.get_by_id(source_luid).name
+        if mode == "Overwrite":
+            src_item = server.datasources.get_by_id(source_luid)
+            item.name = src_item.name
+        else:
+            item.name = new_name
         # datasource-level description (grain statement). REST exposes this only at
         # publish time: the publish request accepts a description attribute, while
         # Update Data Source does not. TSC's publish serializes item.description.
         ds_desc = (spec.get("datasource") or {}).get("description")
+        if not ds_desc and mode == "Overwrite":
+            # Overwrite re-publishes the whole datasource; grain lives in the catalog,
+            # not the .tds, so an unset description here would silently CLEAR it.
+            # Carry the existing grain forward when the spec doesn't override it.
+            ds_desc = src_item.description or None
         if ds_desc:
             item.description = ds_desc
         pub_mode = (TSC.Server.PublishMode.CreateNew if mode == "CreateNew"
@@ -251,23 +261,45 @@ def main():
         (out / "verified.tds").write_text(v_txt, encoding="utf-8")
         post = verify_tds(v_txt, spec)
 
-        # calcs are not surfaced by VDS metadata; confirm via GraphQL (supplementary).
-        # A freshly published PDS may not be indexed by the Metadata API yet, so this
-        # is best-effort: None means "not yet indexed", and calc survival is already
-        # proven by the .tds round-trip (post). verified does not depend on this.
-        calc_seen = {}
-        if spec.get("calcs"):
-            try:
+        # Supplementary GraphQL check (subject to Metadata API indexing lag): confirm
+        # calc registration AND compute description coverage in a single fetch. A
+        # freshly published PDS may not be indexed yet -> values become "_note"; this
+        # never gates `verified` (calc/desc survival is proven by the .tds round-trip).
+        # coverage.undescribed = physical (non-calc) columns still lacking a <desc>.
+        calc_seen, coverage = {}, {}
+        fields = None
+        try:
+            # Metadata API indexes a fresh publish asynchronously; retry so the check
+            # returns real numbers instead of "_note". ~15s x5 covers typical lag
+            # without long stalls, and breaks early once the PDS is indexed.
+            for _attempt in range(5):
                 pubs = graphql(server,
                                "query($l:String!){publishedDatasources(filter:{luid:$l})"
-                               "{fields{name __typename}}}", {"l": published.id}
+                               "{fields{name description __typename}}}", {"l": published.id}
                                ).get("publishedDatasources") or []
-                names = ({f["name"] for f in pubs[0]["fields"]
-                          if f["__typename"] == "CalculatedField"} if pubs else None)
-                for c in spec["calcs"]:
-                    calc_seen[c["caption"]] = (c["caption"] in names) if names is not None else None
-            except Exception as e:  # indexing lag / transient: don't fail the run
-                calc_seen = {"_note": f"graphql check skipped: {str(e)[:100]}"}
+                if pubs and pubs[0]["fields"]:
+                    fields = pubs[0]["fields"]
+                    break
+                if _attempt < 4:
+                    time.sleep(15)
+        except Exception as e:  # transient: don't fail the run
+            calc_seen = coverage = {"_note": f"graphql check skipped: {str(e)[:100]}"}
+        if fields is not None:
+            calc_names = {f["name"] for f in fields
+                          if f["__typename"] == "CalculatedField"}
+            for c in spec.get("calcs", []):
+                calc_seen[c["caption"]] = c["caption"] in calc_names
+            cols = [f for f in fields if f["__typename"] != "CalculatedField"]
+            undescribed = sorted(f["name"] for f in cols
+                                 if not (f.get("description") or "").strip())
+            coverage = {"regular_columns": len(cols),
+                        "described": len(cols) - len(undescribed),
+                        "undescribed": len(undescribed),
+                        "undescribed_columns": undescribed}
+        elif not calc_seen:  # not indexed within window, no exception
+            note = {"_note": "not yet indexed by Metadata API (re-read to confirm)"}
+            calc_seen = dict(note) if spec.get("calcs") else {}
+            coverage = dict(note)
 
         # grain is a server-side catalog attribute (not in the .tds), so re-query it
         ds_desc_check = {}
@@ -281,6 +313,7 @@ def main():
             "mode": mode,
             "roundtrip_checks": post,
             "calc_registered_graphql": calc_seen,
+            "coverage": coverage,
             "datasource_description_check": ds_desc_check,
             # calc survival is covered by post (.tds round-trip); calc_registered_graphql
             # is supplementary (subject to indexing lag) and excluded from verified.
