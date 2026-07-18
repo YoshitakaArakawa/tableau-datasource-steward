@@ -224,37 +224,68 @@ def write_compare_html(view_compare: list[dict], out_dir: Path):
 
 # --- datasource block location --------------------------------------------------
 REPOLOC_RE = re.compile(r"<repository-location\b[^>]*/>")
+DS_TAG_RE = re.compile(r"<datasource\b[^>]*?(/)?>|</datasource>")
 
 
-def find_pds_block(txt: str, source_content_url: str | None) -> tuple[int, int, str]:
+def _block_end(txt: str, start: int) -> int:
+    """End index (exclusive) of the <datasource> element opening at `start`.
+
+    A definition block can NEST another <datasource> (Tableau Cloud inserts a
+    server-side shadow copy of the published datasource, with its own
+    repository-location and sqlproxy connection), so taking the next close tag
+    would truncate the outer block — count nesting depth instead."""
+    depth = 0
+    for m in DS_TAG_RE.finditer(txt, start):
+        if m.group(0).startswith("</"):
+            depth -= 1
+            if depth == 0:
+                return m.end()
+        elif not m.group(1):  # opening tag; self-closing worksheet refs don't nest
+            depth += 1
+    raise SystemExit("unbalanced <datasource> tags in .twb")
+
+
+def find_pds_block(txt: str, source_content_url: str | None,
+                   swap_formulas: list[str]) -> tuple[int, int, str]:
     """Locate the published-datasource definition block to rewire.
 
     Anchors on <repository-location> elements whose path ends with '/datasources'
-    (the workbook's own repository-location uses a '/workbooks' path). Returns
-    (block_start, block_end, current_repository_id). If the workbook uses several
-    published datasources, source_content_url is required to disambiguate.
+    (the workbook's own repository-location uses a '/workbooks' path). Nested
+    shadow copies carry the SAME repository id as their outer block, so nested
+    candidates are dropped; remaining ambiguity (several published datasources)
+    is resolved by source_content_url and, failing that, by which block holds a
+    local calc matching a swap formula. Returns (start, end, repository_id).
     """
     cands = []
     for m in REPOLOC_RE.finditer(txt):
-        path = re.search(r"path='([^']*)'", m.group(0))
+        loc = m.group(0)
+        path = re.search(r"path='([^']*)'", loc)
         if not (path and path.group(1).endswith("/datasources")):
             continue
-        rid = re.search(r"\bid='([^']*)'", m.group(0))
-        cands.append((m.start(), html.unescape(rid.group(1)) if rid else ""))
+        rid = re.search(r"\bid='([^']*)'", loc)
+        bstart = txt.rfind("<datasource ", 0, m.start())
+        if bstart < 0:
+            continue
+        cands.append((bstart, _block_end(txt, bstart),
+                      html.unescape(rid.group(1)) if rid else ""))
+    # drop blocks nested inside another candidate (server-side shadow copies)
+    cands = [c for c in cands
+             if not any(o[0] < c[0] and c[1] <= o[1] for o in cands if o is not c)]
     if source_content_url:
-        cands = [c for c in cands if c[1] == source_content_url]
+        matched = [c for c in cands if c[2] == source_content_url]
+        cands = matched or cands  # fall through to formula match if url mismatches
+    if len(cands) > 1 and swap_formulas:
+        wanted = {normalize(f) for f in swap_formulas}
+        cands = [c for c in cands
+                 if any(col["formula_norm"] in wanted
+                        for col in parse_calc_columns(txt[c[0]:c[1]]))]
     if not cands:
-        raise SystemExit(f"no published-datasource repository-location found"
+        raise SystemExit(f"no published-datasource block found"
                          f" (source_content_url={source_content_url!r})")
     if len(cands) > 1:
-        raise SystemExit("workbook uses multiple published datasources; set"
-                         f" source_pds_luid to pick one of: {[c[1] for c in cands]}")
-    pos, rid = cands[0]
-    start = txt.rfind("<datasource ", 0, pos)
-    end = txt.find("</datasource>", pos)
-    if start < 0 or end < 0:
-        raise SystemExit("could not delimit the enclosing <datasource> element")
-    return start, end + len("</datasource>"), rid
+        raise SystemExit("cannot disambiguate the datasource block to rewire; "
+                         f"candidates (repository ids): {[c[2] for c in cands]}")
+    return cands[0]
 
 
 # --- main -----------------------------------------------------------------------
@@ -308,7 +339,8 @@ def main():
         if spec.get("source_pds_luid"):
             source_content_url = server.datasources.get_by_id(
                 spec["source_pds_luid"]).content_url
-        bstart, bend, current_id = find_pds_block(txt, source_content_url)
+        bstart, bend, current_id = find_pds_block(
+            txt, source_content_url, [s["formula"] for s in swaps])
         block = txt[bstart:bend]
 
         # 1) delete the local calc definitions (match by normalized formula)
@@ -340,9 +372,10 @@ def main():
                                    r"\1", block)
             block, n_cap = re.subn(r"(<datasource\b[^>]*?caption=')[^']*(')",
                                    rf"\g<1>{_xml_escape(pds.name)}\g<2>", block, count=1)
-            # sqlproxy connections carry the datasource display name in dbname
+            # sqlproxy connections carry the datasource CONTENT URL in dbname
+            # (same value as the repository-location id, not the display name)
             block, n_db = re.subn(r"(<connection\b[^>]*class='sqlproxy'[^>]*?dbname=')[^']*(')",
-                                  rf"\g<1>{_xml_escape(pds.name)}\g<2>", block)
+                                  rf"\g<1>{_xml_escape(pds.content_url)}\g<2>", block)
             repoint.update({"performed": True, "id_replaced": n_id,
                             "revision_dropped": n_rev, "caption_updated": n_cap,
                             "dbname_updated": n_db})

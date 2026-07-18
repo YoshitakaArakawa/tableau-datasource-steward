@@ -34,6 +34,7 @@ note: 編集対象の要素・置換規則・検証点を定義する。view レ
 - **workbook 自体の `<repository-location>`**（path が `.../workbooks`）もファイル先頭にある。datasource のものは path が `/datasources` で終わることで区別する。
 - ブロック内の `<column>` + `<calculation>` が **workbook ローカルの calc**。PDS 側 field はここに現れない（使用分が worksheet の dependency キャッシュに写るだけ）。
 - worksheet 内にも `<datasource caption='...' name='sqlproxy...' />` の**自己完結タグの参照**が出るが、これは定義ではない。定義ブロックは `<repository-location>` を含む開きタグ形。
+- 定義ブロックの**内部に、サーバーが挿入した shadow copy の `<datasource>` がネストする**ことがある（独自の repository-location と sqlproxy connection を持ち、repository id は外側と同一）。ブロック終端は `</datasource>` の単純検索ではなく**開閉タグの深さ**で決める。repoint の置換はネストを含むブロック全体に適用する。同一 id が複数あるため、書き換え対象ブロックの特定は「swap 対象 formula のローカル calc を含むか」で最終判別する。
 
 ## 参照の形（token と qualified name）
 
@@ -63,11 +64,11 @@ workbook が旧 PDS を向いたまま augmented PDS の calc を参照しても
 | `<repository-location id='...'` | 旧 PDS の content_url → 新 PDS の content_url |
 | `<repository-location ... revision='...'` | **属性ごと削除**（旧 PDS のリビジョン固定は新 PDS では無意味。無指定 = 最新） |
 | `<datasource caption='...'` | 新 PDS の表示名 |
-| `<connection class='sqlproxy' ... dbname='...'` | 新 PDS の表示名 |
+| `<connection class='sqlproxy' ... dbname='...'` | 新 PDS の **content_url**（repository-location の `id` と同じ値。表示名ではない） |
 
 - 同一 site 内の付け替えを前提とする（path / site 属性は触らない）。
-- dbname が表示名を持つのは実 .twb の観測に基づく仮定（XSD は connection 属性を検証しない）。Document API（document-api-python）も connection の dbname / server 書き換えで同種の付け替えを行っている。置換件数を result に記録し、view 描画検証で最終確認する。
-- workbook が複数の published datasource を使う場合は、どのブロックを付け替えるか `source_pds_luid` で一意化する。
+- XSD は connection 属性を検証しない（`processContents="skip"`）ため、置換件数を result に記録し、view 描画検証で最終確認する。
+- workbook が複数の published datasource を使う場合は、どのブロックを付け替えるか `source_pds_luid` で一意化する（content_url が重複する場合は swap formula の有無で判別される）。
 
 ## 編集 3: token 置換と dependency キャッシュの掃除
 
