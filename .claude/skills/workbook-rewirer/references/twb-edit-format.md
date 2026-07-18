@@ -79,5 +79,7 @@ workbook が旧 PDS を向いたまま augmented PDS の calc を参照しても
 publish 後に確認する（実行は同梱スクリプトが行う）:
 
 1. **round-trip**: 再 DL した .twb で旧 token が消え、新 token と新 content_url が残る
-2. **view 描画**: 全 view の CSV エクスポートが成功する（サーバー側でクエリが実行されるため、参照切れ・formula 不整合はここで露見する。XML 検証だけでは field 解決の成否は分からない）
+2. **view 描画（前後画像並置）**: 編集前の元 workbook と rewired 版の全 view を fresh render（`maxage=1`）で PNG エクスポートする。レンダリングはサーバー側でクエリを実行するため、参照切れ・formula 不整合は export 失敗として露見する（XML 検証だけでは field 解決の成否は分からない）。前後の画像は並置 HTML レポートに出し、内容の同値確認は目視に委ねる
 3. **GraphQL（補助）**: workbook の upstream に対象 PDS が入り、embedded calc から hoist 済み formula が消えている。Metadata API のインデックス遅延があるため合否ゲートには使わない
+
+データ（Query View Data）を前後比較の証拠にしないのは REST API の制約による: dashboard に対しては先頭シートのデータしか返らず、dashboard 内の非表示シートは LUID が解決できず取得できない。dashboard の画像は内包シートをすべて描画するため、画像側にこの穴が無い。

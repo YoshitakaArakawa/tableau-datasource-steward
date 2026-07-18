@@ -1,6 +1,6 @@
 ---
 name: workbook-rewirer
-description: calc hoist 後の下流 workbook を書き換えて PDS 側の calculated field を使わせる write エンジン。workbook の published datasource 接続を augmented PDS に付け替え（repoint）、ローカル calc の定義を削除して参照を PDS 側 calc に差し替え、新規 workbook として publish（既定 CreateNew）した上で全 view の CSV エクスポートでエラーが無いか検証する。寄せた calc を workbook で実際に使わせたい、workbook のデータソースを付け替えたい、hoist 後の workbook 掃除と動作確認をしたいときに使う。prospector → augmenter の hoist ワークフローの後段。
+description: calc hoist 後の下流 workbook を書き換えて PDS 側の calculated field を使わせる write エンジン。workbook の published datasource 接続を augmented PDS に付け替え（repoint）、ローカル calc の定義を削除して参照を PDS 側 calc に差し替え、新規 workbook として publish（既定 CreateNew）した上で、書き換え前後の全 view を画像レンダリングして並置比較レポートを生成し、描画が壊れていないか検証する。寄せた calc を workbook で実際に使わせたい、workbook のデータソースを付け替えたい、hoist 後の workbook 掃除と前後比較の動作確認をしたいときに使う。prospector → augmenter の hoist ワークフローの後段。
 ---
 
 # workbook-rewirer
@@ -28,7 +28,7 @@ PDS への calc hoist だけでは下流 workbook は何も変わらない。ロ
 - published datasource 接続の付け替え（repository-location / caption / dbname。同一 site 内のみ）
 - workbook ローカル calc の定義削除と、全参照（shelf / column-instance / 修飾参照）の PDS 側 calc への置換
 - CreateNew publish（既定）/ Overwrite publish（明示時のみ）
-- 検証: round-trip（再 DL で編集が survive）+ **全 view の CSV エクスポート**（サーバー側でクエリ実行させ、参照切れを露見させる）+ GraphQL 補助チェック
+- 検証: round-trip（再 DL で編集が survive）+ **書き換え前後の view 画像並置比較**（前後それぞれ fresh render で PNG エクスポートし、export 失敗を機械判定・目視用 HTML レポートを生成）+ GraphQL 補助チェック
 
 含まない:
 - view レイアウト・filter・parameter の編集
@@ -59,9 +59,10 @@ PDS への calc hoist だけでは下流 workbook は何も変わらない。ロ
 進捗:
 - [ ] prospector の候補（対象 workbook / formula）と augmenter の result（augmented PDS の luid / calc caption）から spec を作る
 - [ ] `Overwrite` 指定時はユーザー承認を取得（CreateNew は自走可）
-- [ ] `rewire_workbook.py` を実行（download → 編集 → publish → 検証）
-- [ ] `result.json` の `verified` と `view_checks` / `roundtrip_checks` / `repoint` を確認
-- [ ] `view_checks` にエラーがあれば `out-dir` の `original.twb` / `edited.twb` を diff し、参照切れ（token 置換漏れ）か repoint 不備（dbname / content_url）かを切り分け
+- [ ] `rewire_workbook.py` を実行（download → baseline 画像取得 → 編集 → publish → rewired 画像取得・比較）
+- [ ] `result.json` の `verified` と `view_compare` / `roundtrip_checks` / `repoint` を確認
+- [ ] `compare/view-compare.html` の前後画像を見比べ、数値・形の崩れが無いか確認する（PNG を直接読んで差分を確認してもよい）。相対日付や refresh タイミングによる正当な差は想定内として報告に添える
+- [ ] `candidate_export_failed` の view があれば `out-dir` の `original.twb` / `edited.twb` を diff し、参照切れ（token 置換漏れ）か repoint 不備（dbname / content_url）かを切り分け
 - [ ] 対象 workbook が複数あるときは workbook ごとに spec を作って繰り返し、報告にまとめる
 
 スクリプトは編集前の `original.twb(x)` を必ず保存する（revert 用）。
@@ -77,7 +78,9 @@ PDS への calc hoist だけでは下流 workbook は何も変わらない。ロ
 
 ## 検証の注意
 
-- **XML が正しくても field が解決するかは分からない**。view の CSV エクスポート（`view_checks`）が実行時テストの本体で、`verified` の合否に入る。
+- **XML が正しくても field が解決するかは分からない**。前後 view の画像レンダリング（`view_compare`）が実行時テストの本体。壊れた参照は export 失敗として露見し、`candidate_export_failed`（元は描画できたのに rewired 版で失敗）が `verified` を落とす。`baseline_export_failed`（元から壊れている）はブロックしない。
+- **データでの前後比較はしない**。REST の Query View Data は dashboard では先頭シートのデータしか返さず、dashboard 内の非表示シートは LUID が解決できずデータ取得自体ができない。画像なら dashboard が内包シートをすべて描画するためカバレッジが取れる。
+- **画像のピクセル一致も機械判定しない**。refresh タイミングや相対日付フィルタで正当に差が出るため、前後の同値確認は並置レポート（`compare/view-compare.html`）の目視（またはエージェントの画像読解）で行い、判断根拠として報告に載せる。
 - GraphQL チェック（upstream / embedded calc）は Metadata API のインデックス遅延があるため補助扱い。`_note` が出たら後で再読して確認する。
 - 検証の失敗は握り潰さず result に出す。
 
