@@ -9,7 +9,7 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 ## なぜ二段か
 
-- **列メタ（型・role・default aggregation・既存 description）** は Tableau MCP `tableau:get-datasource-metadata` が返す。
+- **列メタ（型・role・default aggregation・既存 description）** は Tableau MCP `get-datasource-metadata` が返す。
 - ただし **`get-datasource-metadata` は datasource レベルの calculated field を列挙しない**（物理列のみ）。既存 calc は Metadata API（GraphQL）で別途読む。
 
 この 2 経路を合わせて初めて「列 + calc」の全体像になる。
@@ -17,8 +17,8 @@ description: Published Data Source のスキーマとメタデータを読み取
 ## ワークフロー
 
 進捗:
-- [ ] 対象 PDS の LUID を確認（無ければ `tableau:list-datasources` で名前から特定）
-- [ ] `tableau:get-datasource-metadata` を LUID で呼び、列の `name` / `dataType` / `role` / `defaultAggregation` / `description`（**全文**）を取得
+- [ ] 対象 PDS の LUID を確認（無ければ `list-datasources` で名前から特定）
+- [ ] `get-datasource-metadata` を LUID で呼び、列の `name` / `dataType` / `role` / `defaultAggregation` / `description`（**全文**）を取得
 - [ ] `read_calcs.py --pds-luid <luid> --out calcs.json` を実行し、既存 calc（formula / description）と **datasource description（grain）** を取得
 - [ ] 3 つを統合し棚卸しレポートを書く：datasource description（grain）の現在値、説明あり/なしの列（既存 desc は**全文**）、role、default-agg、既存 calc 一覧
 - [ ] メタデータ欠落（description 未設定の列・calc、grain 未設定）を gap として明示
@@ -37,7 +37,7 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 ## 認証 / 依存
 
-- MCP: Tableau MCP。接続設定は `.mcp.json`（gitignore 済み。2 系統のテンプレートの使い分けは CLAUDE.md の「認証」を正とする）。
+- MCP: Tableau MCP。接続は環境側で用意された MCP サーバーを前提（接続の詳細は CLAUDE.md の「認証」を正とする）。
 - 既存 calc 読取: OAuth（`scripts/tableau_auth.py`）+ `scripts/metadata_api.py`。依存 `tableauserverclient` / `python-dotenv` / `requests`。
 
 ## Scripts

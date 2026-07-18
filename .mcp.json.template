@@ -4,7 +4,7 @@
       "command": "npx",
       "args": ["-y", "@tableau/mcp-server@latest"],
       "env": {
-        "SERVER": "https://<your-pod>.online.tableau.com",
+        "SERVER": "https://<your-tableau-server-host>",
         "SITE_NAME": "<your-site-content-url>",
         "PAT_NAME": "<your-personal-access-token-name>",
         "PAT_VALUE": "<your-personal-access-token-secret>",

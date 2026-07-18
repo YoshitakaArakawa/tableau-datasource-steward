@@ -8,7 +8,6 @@ scripts/tableau_auth_pat.py
 # OAuth トークンキャッシュ（生 access_token を含む）
 .auth-cache/
 
-# MCP 設定（PAT_VALUE を含む。実値は commit しない。テンプレートは .mcp.json.template）
 .mcp.json
 
 # Python
