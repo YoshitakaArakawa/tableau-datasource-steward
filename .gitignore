@@ -1,6 +1,10 @@
-# 作業用ドラフト（commit しない）
-work/
+# セッション作業物（規約は work/README.md。README のみ追跡）
+work/*
+!work/README.md
 scripts/tableau_auth_pat.py
+
+# 個人ローカル設定（commit しない）
+.claude/settings.local.json
 
 # 認証情報（実値は commit しない。テンプレートは .env.template）
 .env
@@ -13,3 +17,8 @@ scripts/tableau_auth_pat.py
 # Python
 __pycache__/
 *.pyc
+
+# Tableau データソースアーティファクト（接続情報を含みうる。commit しない）
+*.tdsx
+*.tds
+*.hyper
