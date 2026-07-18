@@ -17,13 +17,21 @@ XML edit format:
 from __future__ import annotations
 
 import argparse
+import difflib
 import html
 import json
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+
+# Windows コンソール (cp932) は日本語フィールド名を化けさせ、RESULT_JSON の照合を壊す。
+# フィールド名の照合はファイル経由が正だが、stdout/stderr も UTF-8 に固定する。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 
 # --- locate shared modules in the repo-root scripts/ directory -----------------
@@ -38,6 +46,7 @@ def _find_repo_scripts() -> Path:
 
 
 sys.path.insert(0, str(_find_repo_scripts()))
+import requests  # noqa: E402
 import tableauserverclient as TSC  # noqa: E402
 from tableau_auth import signed_in_server  # noqa: E402  (OAuth)
 from metadata_api import graphql  # noqa: E402
@@ -177,6 +186,116 @@ def inject_calcs(txt: str, calcs: list[dict]) -> str:
     return _insert_at_datasource_level(txt, blocks)
 
 
+# --- desc-only Overwrite: diff gate & preflight --------------------------------
+def desc_only_diff_gate(orig_txt: str, edited_txt: str) -> dict:
+    """publish 前の機械証明: 編集差分が <desc> 関連に限られることを確認する。
+
+    per-PDS の人間承認の代わりになる安全装置。両 XML から (a) すべての <desc> を除去し、
+    (b) 除去後に空になった「元に存在しない <column>」（desc だけを載せるために
+    metadata-record から合成した殻）を取り除いた上で、canonical XML の一致を要求する。
+    一致しなければ desc 以外への変更が混入しており、publish してはならない。
+    """
+    def _strip_desc(txt: str):
+        root = ET.fromstring(txt)
+        for parent in root.iter():
+            for child in list(parent):
+                if child.tag == "desc":
+                    parent.remove(child)
+        # desc 挿入は周囲の整形用空白（改行・インデント）も変える。意味を持たない
+        # 空白のみのテキストノードは比較から外す（非空白テキストは厳密比較のまま）。
+        for el in root.iter():
+            if el.text is not None and not el.text.strip():
+                el.text = None
+            if el.tail is not None and not el.tail.strip():
+                el.tail = None
+        return root
+
+    orig_root = _strip_desc(orig_txt)
+    orig_cols = {c.get("name") for c in orig_root.iter("column")}
+    edited_root = _strip_desc(edited_txt)
+    synthesized = []
+    for parent in edited_root.iter():
+        for child in list(parent):
+            if (child.tag == "column" and len(child) == 0
+                    and not (child.text or "").strip()
+                    and child.get("name") not in orig_cols):
+                synthesized.append(child.get("name"))
+                parent.remove(child)
+
+    a = ET.canonicalize(ET.tostring(orig_root, encoding="unicode"))
+    b = ET.canonicalize(ET.tostring(edited_root, encoding="unicode"))
+    ok = a == b
+    gate = {"ok": ok, "synthesized_desc_columns": synthesized}
+    if not ok:
+        # 差分の先頭だけをヒントとして残す（全文 diff は out-dir の .tds を読む）
+        delta = list(difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm=""))
+        gate["diff_head"] = [l for l in delta if l.startswith(("+", "-"))][:10]
+    return gate
+
+
+def _rest_get(server, path: str, params: dict | None = None):
+    r = requests.get(
+        f"{server.server_address}/api/{server.version}/sites/{server.site_id}/{path}",
+        headers={"X-Tableau-Auth": server.auth_token, "Accept": "application/json"},
+        params=params or {}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"REST GET {path}: HTTP {r.status_code} {r.text[:200]}")
+    return r.json()
+
+
+def preflight_desc_only(server, source_luid: str) -> dict:
+    """desc-only Overwrite を自走してよいかを機械判定する。
+
+    - connections: embedPassword=true の接続があれば block。republish は connection
+      オブジェクトを作り直すため、埋め込み資格情報は失われうる（資格情報を埋めない
+      PDS = extract / Published DS / 仮想接続入力なら影響なし）。
+    - upstream flow: 実行中 (InProgress / Pending) の flow run があれば block。
+      download→publish の間に flow が完走するとデータが巻き戻るため。
+      次回スケジュール実行 (nextRunAt) が近い場合は warning（block はしない。
+      往復は通常数分で、実行と重なったケースは round-trip 検証と次回 flow 実行で
+      自己回復する）。
+    """
+    pf: dict = {"ok": True, "blocks": [], "warnings": []}
+
+    conns = (_rest_get(server, f"datasources/{source_luid}/connections")
+             .get("connections", {}) or {}).get("connection", [])
+    embedded = [c["id"] for c in conns if str(c.get("embedPassword")).lower() == "true"]
+    pf["connections"] = {"n": len(conns), "embed_password": embedded}
+    if embedded:
+        pf["ok"] = False
+        pf["blocks"].append(f"embedPassword=true の接続あり: {embedded}")
+
+    try:
+        flows = (graphql(server,
+                         "query($l:String!){publishedDatasources(filter:{luid:$l})"
+                         "{upstreamFlows{luid name}}}", {"l": source_luid})
+                 .get("publishedDatasources") or [{}])[0].get("upstreamFlows") or []
+        pf["upstream_flows"] = [{"luid": f["luid"], "name": f["name"]} for f in flows]
+        flow_luids = {f["luid"] for f in flows}
+        if flow_luids:
+            runs = (_rest_get(server, "flows/runs").get("flowRuns", {}) or {}).get("flowRuns", [])
+            active = [r for r in runs
+                      if r.get("flowId") in flow_luids
+                      and r.get("status") in ("InProgress", "Pending", "Queued")]
+            if active:
+                pf["ok"] = False
+                pf["blocks"].append(
+                    f"実行中の upstream flow run: {[r.get('id') for r in active]}")
+            tasks = (_rest_get(server, "tasks/runFlow").get("tasks", {}) or {}).get("task", [])
+            next_runs = [t.get("flowRun", {}).get("schedule", {}).get("nextRunAt")
+                         for t in tasks
+                         if (t.get("flowRun", {}).get("flow", {}) or {}).get("id") in flow_luids]
+            next_runs = sorted(n for n in next_runs if n)
+            pf["next_scheduled_run"] = next_runs[0] if next_runs else None
+            if next_runs:
+                pf["warnings"].append(
+                    f"upstream flow の次回実行 {next_runs[0]}。往復と重なるなら後回しを検討")
+    except Exception as e:  # flow 情報が取れない場合は warning に落とす（block しない）
+        pf["warnings"].append(f"flow 状態の確認が不完全: {str(e)[:150]}")
+
+    return pf
+
+
 # --- verify --------------------------------------------------------------------
 def verify_tds(txt: str, spec: dict) -> dict:
     checks = {}
@@ -188,11 +307,38 @@ def verify_tds(txt: str, spec: dict) -> dict:
 
 
 # --- main ----------------------------------------------------------------------
+def rollback(spec_path: str, out_dir: str) -> None:
+    """out-dir に保全した original.tdsx を元 PDS へ Overwrite 再 publish して巻き戻す。"""
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    orig = Path(out_dir) / "original.tdsx"
+    if not orig.exists():
+        raise SystemExit(f"original.tdsx not found in {out_dir}")
+    with signed_in_server() as server:
+        src_item = server.datasources.get_by_id(spec["source_luid"])
+        item = TSC.DatasourceItem(src_item.project_id)
+        item.name = src_item.name
+        if src_item.description:  # grain も元の値で戻す（publish 時にしか設定できない）
+            item.description = src_item.description
+        published = server.datasources.publish(
+            item, str(orig), mode=TSC.Server.PublishMode.Overwrite)
+        result = {"phase": "rollback", "published_luid": published.id,
+                  "luid_preserved": published.id == spec["source_luid"]}
+        print("RESULT_JSON:", json.dumps(result, ensure_ascii=False))
+        if not result["luid_preserved"]:
+            raise SystemExit(2)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--spec", required=True)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--rollback", action="store_true",
+                    help="out-dir の original.tdsx を元 PDS へ Overwrite 再 publish して巻き戻す")
     args = ap.parse_args()
+
+    if args.rollback:
+        rollback(args.spec, args.out_dir)
+        return
 
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     out = Path(args.out_dir)
@@ -208,10 +354,25 @@ def main():
     if mode == "CreateNew" and not new_name:
         raise SystemExit("CreateNew requires target.new_name")
 
+    # desc-only Overwrite: calcs を含まない Overwrite は「準非破壊」経路。
+    # 人間の per-PDS 承認の代わりに preflight + diff ゲートで機械的に安全を証明する。
+    desc_only = (mode == "Overwrite") and not spec.get("calcs")
+
     with signed_in_server() as server:
-        # download source
+        preflight = None
+        if desc_only:
+            preflight = preflight_desc_only(server, source_luid)
+            if not preflight["ok"]:
+                result = {"mode": mode, "desc_only": True, "preflight": preflight,
+                          "verified": False, "aborted": "preflight"}
+                (out / "result.json").write_text(
+                    json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+                print("RESULT_JSON:", json.dumps(result, ensure_ascii=False))
+                raise SystemExit(2)
+
+        # download source（filepath は拡張子抜きで渡す。TSC が正しい拡張子を付ける）
         orig_tdsx = Path(server.datasources.download(
-            source_luid, filepath=str(out / "original.tdsx"), include_extract=True))
+            source_luid, filepath=str(out / "original"), include_extract=True))
         tds_name, txt, src_zip = read_tds(orig_tdsx)
         (out / "original.tds").write_text(txt, encoding="utf-8")
 
@@ -224,21 +385,28 @@ def main():
         if not all(pre.values()):
             raise SystemExit(f"pre-publish edit incomplete: {pre}")
 
+        diff_gate = None
+        if desc_only:
+            diff_gate = desc_only_diff_gate(
+                (out / "original.tds").read_text(encoding="utf-8"), txt)
+            if not diff_gate["ok"]:
+                result = {"mode": mode, "desc_only": True, "preflight": preflight,
+                          "diff_gate": diff_gate, "verified": False, "aborted": "diff_gate"}
+                (out / "result.json").write_text(
+                    json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+                print("RESULT_JSON:", json.dumps(result, ensure_ascii=False))
+                raise SystemExit(2)
+
         edited_tdsx = out / "edited.tdsx"
         write_tdsx(src_zip, tds_name, txt, edited_tdsx)
 
-        # project resolution
-        project_id = target.get("project_id")
-        if not project_id and mode == "CreateNew":
-            src = server.datasources.get_by_id(source_luid)
-            project_id = src.project_id  # inherit source project
+        # project resolution。Overwrite の同一性判定は「名前 + プロジェクト」なので、
+        # project を継承しないと既定プロジェクトへ同名の別 PDS を新規作成してしまう。
+        src_item = server.datasources.get_by_id(source_luid)
+        project_id = target.get("project_id") or src_item.project_id
 
         item = TSC.DatasourceItem(project_id)
-        if mode == "Overwrite":
-            src_item = server.datasources.get_by_id(source_luid)
-            item.name = src_item.name
-        else:
-            item.name = new_name
+        item.name = src_item.name if mode == "Overwrite" else new_name
         # datasource-level description (grain statement). REST exposes this only at
         # publish time: the publish request accepts a description attribute, while
         # Update Data Source does not. TSC's publish serializes item.description.
@@ -256,7 +424,7 @@ def main():
 
         # verify round-trip
         ver_tdsx = Path(server.datasources.download(
-            published.id, filepath=str(out / "verified.tdsx"), include_extract=False))
+            published.id, filepath=str(out / "verified"), include_extract=False))
         _, v_txt, _ = read_tds(ver_tdsx)
         (out / "verified.tds").write_text(v_txt, encoding="utf-8")
         post = verify_tds(v_txt, spec)
@@ -272,13 +440,17 @@ def main():
             # Metadata API indexes a fresh publish asynchronously; retry so the check
             # returns real numbers instead of "_note". ~15s x5 covers typical lag
             # without long stalls, and breaks early once the PDS is indexed.
+            upstream_tables: set[str] = set()
             for _attempt in range(5):
                 pubs = graphql(server,
                                "query($l:String!){publishedDatasources(filter:{luid:$l})"
-                               "{fields{name description __typename}}}", {"l": published.id}
-                               ).get("publishedDatasources") or []
+                               "{upstreamTables{name}"
+                               "fields{name description __typename "
+                               "... on ColumnField{upstreamColumns{luid}}}}}",
+                               {"l": published.id}).get("publishedDatasources") or []
                 if pubs and pubs[0]["fields"]:
                     fields = pubs[0]["fields"]
+                    upstream_tables = {t["name"] for t in pubs[0].get("upstreamTables") or []}
                     break
                 if _attempt < 4:
                     time.sleep(15)
@@ -289,13 +461,21 @@ def main():
                           if f["__typename"] == "CalculatedField"}
             for c in spec.get("calcs", []):
                 calc_seen[c["caption"]] = c["caption"] in calc_names
-            cols = [f for f in fields if f["__typename"] != "CalculatedField"]
+            # GraphQL は論理テーブル自体を ColumnField として数える（名前がテーブル名と
+            # 一致し upstream 列を持たない）。実列ではないので分母から除外する。
+            pseudo = sorted(f["name"] for f in fields
+                            if f["__typename"] == "ColumnField"
+                            and f["name"] in upstream_tables
+                            and not (f.get("upstreamColumns") or []))
+            cols = [f for f in fields
+                    if f["__typename"] != "CalculatedField" and f["name"] not in pseudo]
             undescribed = sorted(f["name"] for f in cols
                                  if not (f.get("description") or "").strip())
             coverage = {"regular_columns": len(cols),
                         "described": len(cols) - len(undescribed),
                         "undescribed": len(undescribed),
-                        "undescribed_columns": undescribed}
+                        "undescribed_columns": undescribed,
+                        "pseudo_table_fields_excluded": pseudo}
         elif not calc_seen:  # not indexed within window, no exception
             note = {"_note": "not yet indexed by Metadata API (re-read to confirm)"}
             calc_seen = dict(note) if spec.get("calcs") else {}
@@ -307,17 +487,26 @@ def main():
             got = server.datasources.get_by_id(published.id).description
             ds_desc_check["datasource.description"] = (got == ds_desc)
 
+        # Overwrite は「名前 + プロジェクト」一致で LUID を保持する。別 LUID になったら
+        # project 解決を誤って重複 PDS を作っている（下流参照が繋がらない）。
+        luid_preserved = (published.id == source_luid) if mode == "Overwrite" else None
+
         result = {
             "published_luid": published.id,
             "published_name": published.name,
             "mode": mode,
+            "desc_only": desc_only,
+            "luid_preserved": luid_preserved,
+            "preflight": preflight,
+            "diff_gate": diff_gate,
             "roundtrip_checks": post,
             "calc_registered_graphql": calc_seen,
             "coverage": coverage,
             "datasource_description_check": ds_desc_check,
             # calc survival is covered by post (.tds round-trip); calc_registered_graphql
             # is supplementary (subject to indexing lag) and excluded from verified.
-            "verified": (all(post.values()) and all(ds_desc_check.values() or [True])),
+            "verified": (all(post.values()) and all(ds_desc_check.values() or [True])
+                         and luid_preserved is not False),
         }
         (out / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False),
                                          encoding="utf-8")
