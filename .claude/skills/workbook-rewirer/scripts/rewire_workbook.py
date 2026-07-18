@@ -4,7 +4,12 @@ then publish (CreateNew by default) and verify every view still renders.
 
 Reads a rewire spec (JSON), downloads the workbook (.twb/.twbx), edits the .twb XML
 (newline-agnostic), republishes, re-downloads to check the edits survived, and
-exports each view as CSV to prove the swapped calc actually resolves on the server.
+renders every view of the ORIGINAL and the REWIRED workbook as fresh PNGs into a
+side-by-side compare report (compare/view-compare.html). Export success is the
+machine verdict; visual equivalence is eyeball material for the reviewer.
+Query View Data is deliberately not used as comparison evidence: on dashboards it
+returns only the first sheet, and hidden sheets have no LUID to query at all,
+while dashboard images draw every sheet they contain.
 
 usage:
     python rewire_workbook.py --spec spec.json --out-dir <dir>
@@ -137,6 +142,86 @@ def strip_dependency_calculations(txt: str, token: str) -> tuple[str, int]:
     return pat.sub(_clean, txt), stripped
 
 
+# --- before/after view rendering ------------------------------------------------
+def _slug(name: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in name).strip("_").lower()
+
+
+def export_view_images(server, wb_item, prefix: str, out_dir: Path) -> dict[str, dict]:
+    """Freshly render every LUID-addressable view (visible sheets + dashboards)
+    of a workbook as PNG. Hidden sheets have no LUID and cannot be exported
+    individually, but dashboards draw every sheet they contain, so dashboard
+    images cover them."""
+    server.workbooks.populate_views(wb_item)
+    recs: dict[str, dict] = {}
+    for v in wb_item.views:
+        rec = {"png": "", "error": ""}
+        try:
+            # maxage=1 forces a fresh render instead of a stale cached image
+            opts = TSC.ImageRequestOptions(
+                imageresolution=TSC.ImageRequestOptions.Resolution.High, maxage=1)
+            server.views.populate_image(v, opts)
+            name = f"{prefix}_{_slug(v.name)}.png"
+            (out_dir / name).write_bytes(v.image)
+            rec["png"] = name
+        except Exception as e:  # a single broken view must not hide the others
+            rec["error"] = str(e)[:200]
+        recs[v.name] = rec
+    return recs
+
+
+# These verdicts force verified=false. baseline_export_failed does not: the
+# original was already broken there; the rewired copy rendering is an
+# improvement to confirm, not a defect introduced by the rewire.
+BLOCKING_VERDICTS = ("candidate_export_failed", "export_failed", "only_in_one_workbook")
+
+
+def build_view_compare(baseline: dict, candidate: dict) -> list[dict]:
+    """Per-view verdicts, matched by view name. Export-based only — whether each
+    side rendered. Pixel equality is deliberately not judged (refresh timing and
+    render nondeterminism make it noisy); the images are reviewer material."""
+    rows = []
+    for name in sorted(set(baseline) | set(candidate)):
+        b, c = baseline.get(name), candidate.get(name)
+        if not (b and c):
+            verdict = "only_in_one_workbook"
+        elif b["error"] and c["error"]:
+            verdict = "export_failed"
+        elif c["error"]:
+            verdict = "candidate_export_failed"  # rewire broke a working view
+        elif b["error"]:
+            verdict = "baseline_export_failed"
+        else:
+            verdict = "ok"
+        rows.append({"view": name, "verdict": verdict,
+                     "baseline": b or {}, "candidate": c or {}})
+    return rows
+
+
+def write_compare_html(view_compare: list[dict], out_dir: Path):
+    """Side-by-side original/rewired images per view, for the approval report."""
+    esc = html.escape
+
+    def cell(rec: dict) -> str:
+        if rec.get("png"):
+            return (f"<figure><a href='{esc(rec['png'])}'>"
+                    f"<img src='{esc(rec['png'])}' alt='' loading='lazy'></a></figure>")
+        return f"<figure><p class='err'>{esc(rec.get('error') or 'missing')}</p></figure>"
+
+    body = "".join(
+        f"<h2>{esc(r['view'])} — {esc(r['verdict'])}</h2>"
+        f"<div class='pair'>{cell(r['baseline'])}{cell(r['candidate'])}</div>"
+        for r in view_compare)
+    page = (
+        "<!doctype html><meta charset='utf-8'><title>view compare</title>"
+        "<style>body{font-family:sans-serif;margin:1rem}"
+        ".pair{display:flex;gap:1rem;align-items:flex-start;overflow-x:auto}"
+        "figure{margin:0;flex:1;min-width:0}img{max-width:100%;border:1px solid #ccc}"
+        ".err{color:#c62828}</style>"
+        "<h1>original (left) vs rewired (right)</h1>" + body)
+    (out_dir / "view-compare.html").write_text(page, encoding="utf-8")
+
+
 # --- datasource block location --------------------------------------------------
 REPOLOC_RE = re.compile(r"<repository-location\b[^>]*/>")
 
@@ -212,6 +297,12 @@ def main():
             src_wb.id, filepath=str(out / "original"), include_extract=True))
         twb_name, txt, src_zip = read_document(wb_path, ".twb")
         (out / "original.twb").write_text(txt, encoding="utf-8")
+
+        # baseline renders BEFORE any edit: the untouched original is the
+        # reference the rewired copy is compared against
+        compare_dir = out / "compare"
+        compare_dir.mkdir(exist_ok=True)
+        baseline = export_view_images(server, src_wb, "baseline", compare_dir)
 
         source_content_url = None
         if spec.get("source_pds_luid"):
@@ -293,19 +384,15 @@ def main():
                 _xml_escape(r["new_token"]) in v_txt)
         roundtrip["repository_id"] = _xml_escape(pds.content_url) in v_txt
 
-        # 6) render check: exporting each view as CSV forces server-side query
-        #    execution, so a broken field reference fails loudly here
-        view_checks = {}
-        server.workbooks.populate_views(published)
-        for v in published.views:
-            try:
-                server.views.populate_csv(v)
-                b"".join(v.csv)  # csv is lazy; consuming it triggers the request
-                view_checks[v.name] = "ok"
-            except Exception as e:
-                view_checks[v.name] = f"error: {str(e)[:200]}"
-        if not view_checks:
-            view_checks["_note"] = "workbook has no views to verify"
+        # 6) render check + compare evidence: rendering forces server-side query
+        #    execution, so a broken field reference fails the export here. The
+        #    baseline/candidate image pairs go into a side-by-side report for
+        #    the reviewer (visual equivalence is not auto-judged).
+        candidate = export_view_images(server, published, "candidate", compare_dir)
+        view_compare = build_view_compare(baseline, candidate)
+        write_compare_html(view_compare, compare_dir)
+        compare_tally = {k: sum(1 for r in view_compare if r["verdict"] == k)
+                         for k in ("ok", "baseline_export_failed") + BLOCKING_VERDICTS}
 
         # 7) supplementary GraphQL check (subject to Metadata API indexing lag):
         #    the rewired workbook should list the target PDS upstream and should
@@ -345,12 +432,18 @@ def main():
             "swaps": swap_results,
             "repoint": repoint,
             "roundtrip_checks": roundtrip,
-            "view_checks": view_checks,
+            "view_compare": {
+                "views": view_compare,
+                "tally": compare_tally,
+                "html": "compare/view-compare.html",
+                "_note": ("" if view_compare else "workbook has no views to verify"),
+            },
             "graphql_checks": gql,
-            # gate on what this run can prove: edits survived AND every view renders
+            # gate on what this run can prove: edits survived AND no view broke
+            # where the original rendered (visual equivalence stays with the reviewer)
             "verified": (all(roundtrip.values())
-                         and all(v == "ok" for k, v in view_checks.items()
-                                 if k != "_note")),
+                         and not any(r["verdict"] in BLOCKING_VERDICTS
+                                     for r in view_compare)),
         }
         (out / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False),
                                          encoding="utf-8")

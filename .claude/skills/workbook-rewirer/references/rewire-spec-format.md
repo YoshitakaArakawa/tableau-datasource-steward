@@ -40,6 +40,6 @@ note: 例の値はすべてダミー。1 spec = 1 workbook。複数 workbook を
 | `swaps[]` | 各差し替えの `old_token` / `new_token` / `refs_replaced`（参照置換数）/ `dependency_calcs_stripped` |
 | `repoint` | 付け替えの実施有無と各置換件数（`id_replaced` / `caption_updated` / `dbname_updated`） |
 | `roundtrip_checks` | 再 DL した .twb での旧 token 消失・新 token / content_url 残存 |
-| `view_checks` | view ごとの CSV エクスポート結果（`ok` / `error: ...`） |
+| `view_compare` | view ごとの前後 render 結果（`views[]` の verdict: `ok` / `candidate_export_failed` / `baseline_export_failed` / `export_failed` / `only_in_one_workbook`）と集計 `tally`。画像並置は `compare/view-compare.html` |
 | `graphql_checks` | 補助チェック（upstream / embedded calc）。インデックス遅延時は `_note` |
-| `verified` | `roundtrip_checks` 全通過 かつ `view_checks` 全 `ok` |
+| `verified` | `roundtrip_checks` 全通過 かつ `view_compare` にブロック verdict（`candidate_export_failed` / `export_failed` / `only_in_one_workbook`）なし。画像内容の同値は目視確認の領分で合否に含めない |
