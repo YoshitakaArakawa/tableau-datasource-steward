@@ -9,7 +9,7 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 ## なぜ二段か
 
-- **列メタ（型・role・default aggregation・既存 description）** は Tableau MCP `Tableau:get-datasource-metadata` が返す。
+- **列メタ（型・role・default aggregation・既存 description）** は Tableau MCP `tableau:get-datasource-metadata` が返す。
 - ただし **`get-datasource-metadata` は datasource レベルの calculated field を列挙しない**（物理列のみ）。既存 calc は Metadata API（GraphQL）で別途読む。
 
 この 2 経路を合わせて初めて「列 + calc」の全体像になる。
@@ -17,8 +17,8 @@ description: Published Data Source のスキーマとメタデータを読み取
 ## ワークフロー
 
 進捗:
-- [ ] 対象 PDS の LUID を確認（無ければ `Tableau:list-datasources` で名前から特定）
-- [ ] `Tableau:get-datasource-metadata` を LUID で呼び、列の `name` / `dataType` / `role` / `defaultAggregation` / `description`（**全文**）を取得
+- [ ] 対象 PDS の LUID を確認（無ければ `tableau:list-datasources` で名前から特定）
+- [ ] `tableau:get-datasource-metadata` を LUID で呼び、列の `name` / `dataType` / `role` / `defaultAggregation` / `description`（**全文**）を取得
 - [ ] `read_calcs.py --pds-luid <luid> --out calcs.json` を実行し、既存 calc（formula / description）と **datasource description（grain）** を取得
 - [ ] 3 つを統合し棚卸しレポートを書く：datasource description（grain）の現在値、説明あり/なしの列（既存 desc は**全文**）、role、default-agg、既存 calc 一覧
 - [ ] メタデータ欠落（description 未設定の列・calc、grain 未設定）を gap として明示
@@ -31,13 +31,13 @@ description: Published Data Source のスキーマとメタデータを読み取
 - 既存 calc 一覧：name / formula / **description（全文）**
 - gap：description が未設定の列・calc、grain 未設定
 
-既存 desc・grain を**全文**で出すのは、`datasource-describer` が「未設定を埋める」だけでなく「**既存 desc が現データに対して適切か検証する**」ためにも本レポートを使うため。inspector は事実（現在値）を提示するだけで、内容の妥当性判定はしない（判定は describer）。
+既存 desc・grain を**全文**で出すのは、`datasource-describer` が「未設定を埋める」だけでなく「**既存 desc が現データに対して適切か検証する**」ためにも本レポートを使うため。inspector は事実（現在値）を提示するだけで、内容の妥当性判定はしない（判定は describer）。READ 層に推論を持ち込まない。
 
 このレポートは `datasource-describer`（説明草案・既存 desc の検証）と `datasource-augmenter`（注入）の入力になる。
 
 ## 認証 / 依存
 
-- MCP: Tableau MCP（`INCLUDE_TOOLS` に datasource 系）。設定は `.mcp.json`（実値は gitignore、テンプレート `.mcp.json.template`）。
+- MCP: Tableau MCP。接続設定は `.mcp.json`（gitignore 済み。2 系統のテンプレートの使い分けは CLAUDE.md の「認証」を正とする）。
 - 既存 calc 読取: OAuth（`scripts/tableau_auth.py`）+ `scripts/metadata_api.py`。依存 `tableauserverclient` / `python-dotenv` / `requests`。
 
 ## Scripts
@@ -45,10 +45,3 @@ description: Published Data Source のスキーマとメタデータを読み取
 | スクリプト | 役割 |
 |---|---|
 | `scripts/read_calcs.py` | Metadata API で既存 calculated field（formula / description）と datasource description（grain）を取得し `calcs.json` に出力 |
-
-## 設計原則
-
-- 読取のみ。変更は augmenter に委譲
-- 列メタは MCP、既存 calc は GraphQL（MCP が calc を列挙しない制約への対応）
-- gap（未整備）を明示し、後段 Skill の作業対象を絞る
-- 既存 desc・grain は**全文を事実として出す**。内容が現データに対して適切かの判定はしない（検証は describer）。READ 層に推論を持ち込まない
