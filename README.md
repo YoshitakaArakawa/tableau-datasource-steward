@@ -52,7 +52,7 @@ Repo 名 = Agent 名を `tableau-datasource-steward` で統一する。
 
 ## 構成
 
-中核ロジックは `.claude/skills/` 配下の 4 Skill に分かれ、ルーティングと横断ポリシーは orchestrator（[CLAUDE.md](CLAUDE.md)）が担う。データは「読取・提案（副作用なし）→ change-set → write（唯一の出口）」の一方向に流れる。
+中核ロジックは `.claude/skills/` 配下の 5 Skill に分かれ、ルーティングと横断ポリシーは orchestrator（[CLAUDE.md](CLAUDE.md)）が担う。データは「読取・提案（副作用なし）→ change-set → write」の一方向に流れる。write は PDS 向けと workbook 向けの 2 Skill のみ。
 
 | Skill | 系統 | 役割 |
 |---|---|---|
@@ -60,6 +60,7 @@ Repo 名 = Agent 名を `tableau-datasource-steward` で統一する。
 | `datasource-describer` | ANALYZE | 説明草案の生成と既存説明の検証 |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc 検出 |
 | `datasource-augmenter` | WRITE | change-set の注入・publish・round-trip 検証 |
+| `workbook-rewirer` | WRITE | 下流 workbook の PDS 付け替え・calc 参照差し替え・view 描画検証 |
 
 各 Skill の詳細な責務分担は [CLAUDE.md](CLAUDE.md) の Skill マップを正とする。
 
@@ -75,8 +76,8 @@ REST / Metadata API 用の認証（`scripts/`）は MCP とは別系統で、`.e
 
 ## 安全ポリシー
 
-- **publish は既定 `CreateNew`**: 別名で新規 PDS を作り、元を壊さない。`Overwrite` は破壊的（下流 workbook を巻き込みうる）で、明示要求 + 下流影響の提示 + ユーザー承認がそろったときのみ。
-- **承認ゲートは破壊的操作の前**: Overwrite publish / PDS 削除 / promote の前は必ず確認。読取・change-set 生成・CreateNew は非破壊。
+- **publish は既定 `CreateNew`**: 別名で新規 PDS / workbook を作り、元を壊さない。`Overwrite` は破壊的（PDS なら下流 workbook を巻き込みうる。workbook なら本番 view を直接置換する）で、明示要求 + 影響の提示 + ユーザー承認がそろったときのみ。
+- **承認ゲートは破壊的操作の前**: Overwrite publish（PDS / workbook とも）/ 削除 / promote の前は必ず確認。読取・change-set 生成・CreateNew は非破壊。
 - **認証は OAuth**（PKCE）。読取系の一部は Tableau MCP を併用。
 
 承認ゲートの範囲・自走ユースケースでの扱いなど詳細は [CLAUDE.md](CLAUDE.md) の横断ポリシーを正とする。
