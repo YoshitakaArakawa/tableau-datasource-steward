@@ -1,10 +1,19 @@
 """Find calculated fields duplicated across the downstream workbooks of a PDS,
 and propose hoist candidates (calcs to consolidate into the published data source).
 
-Pipeline: target PDS -> downstream workbooks (Metadata API) -> their embedded
-CalculatedFields -> normalize formula (comment-stripped key) -> group across
-workbooks -> classify hoistability (operands present in the PDS, not a table
-calc). Emits a change-set fragment compatible with datasource-augmenter (calcs[]).
+Pipeline: target PDS -> downstream workbooks (Metadata API) -> CalculatedFields
+of the embedded datasources that DIRECTLY proxy the target PDS -> normalize
+formula (comment-stripped key) -> group across workbooks -> classify
+hoistability (operands present in the PDS, not a table calc). Emits a
+change-set fragment compatible with datasource-augmenter (calcs[]).
+
+Direct-proxy scoping: Metadata API lineage (downstreamWorkbooks and an embedded
+datasource's upstreamDatasources) is TRANSITIVE — a workbook connected to a
+derived PDS also appears downstream of every ancestor PDS. The direct upstream
+set of a connection is recovered by transitive-closure subtraction: an upstream
+u is direct iff no other member of the upstream set reaches u through its own
+upstreams. Only calcs on connections whose direct set contains the target are
+candidates; other workbooks are reported as transitive_skipped.
 
 Per group we also carry the structured WB-side descriptions (the calc's own
 `description` field) and the raw formula WITH comments, as extraction material
@@ -61,10 +70,37 @@ query($l:String!){
 WB_CALCS = """
 query($l:String!){
   workbooks(filter:{luid:$l}){
-    embeddedDatasources{ fields{ name description __typename ... on CalculatedField{ formula } } }
+    embeddedDatasources{
+      name
+      upstreamDatasources{ luid }
+      fields{ name description __typename ... on CalculatedField{ formula } }
+    }
   }
 }
 """
+
+PDS_UPSTREAM = """
+query($l:String!){
+  publishedDatasources(filter:{luid:$l}){ upstreamDatasources{ luid } }
+}
+"""
+
+
+def direct_upstreams(server, ups: set, cache: dict) -> set:
+    """Direct members of a transitive upstream set, by closure subtraction.
+
+    An upstream u is direct iff no other member of `ups` reaches u through its
+    own (transitive) upstreams. `cache` memoizes each PDS's upstream set so the
+    per-workbook loop queries each ancestor once per run.
+    """
+    covered = set()
+    for u in ups:
+        if u not in cache:
+            d = graphql(server, PDS_UPSTREAM, {"l": u}).get("publishedDatasources") or []
+            cache[u] = ({x["luid"] for x in (d[0].get("upstreamDatasources") or [])}
+                        if d else set())
+        covered |= cache[u]
+    return ups - covered
 
 
 def strip_comments(formula: str) -> str:
@@ -115,10 +151,22 @@ def main():
         # comment-stripped formula -> set(workbook名), 代表 caption, raw formula(コメント込み), WB-side desc
         groups = defaultdict(lambda: {"workbooks": set(), "captions": set(),
                                       "raw": None, "wb_descriptions": set()})
+        pds_up_cache: dict[str, set] = {}
+        direct_wbs, transitive_skipped = [], []
         for wb in workbooks:
+            wb_direct = False
             wbres = graphql(server, WB_CALCS, {"l": wb["luid"]}).get("workbooks") or []
             for w in wbres:
                 for eds in w.get("embeddedDatasources") or []:
+                    # 対象 PDS を「直接」proxy する接続の calc だけを候補にする。
+                    # upstreamDatasources は推移的なので、閉包差分で直接上流を
+                    # 復元する（他の upstream から到達できる u は間接）。
+                    ups = {u["luid"] for u in eds.get("upstreamDatasources") or []}
+                    if args.pds_luid not in ups:
+                        continue
+                    if args.pds_luid not in direct_upstreams(server, ups, pds_up_cache):
+                        continue  # 対象へは派生 PDS 経由でしか届かない接続
+                    wb_direct = True
                     for f in eds.get("fields") or []:
                         if f.get("__typename") == "CalculatedField" and f.get("formula"):
                             key = normalize(f["formula"])
@@ -129,6 +177,10 @@ def main():
                             desc = (f.get("description") or "").strip()
                             if desc:
                                 g["wb_descriptions"].add(desc)
+            if wb_direct:
+                direct_wbs.append(wb)
+            else:
+                transitive_skipped.append(wb["name"])
 
     candidates = []
     for norm, g in groups.items():
@@ -161,13 +213,16 @@ def main():
         "pds_luid": args.pds_luid,
         "pds_name": pds["name"],
         "downstream_workbooks": len(workbooks),
+        "downstream_workbooks_direct": len(direct_wbs),
+        "transitive_skipped": sorted(transitive_skipped),
         "candidate_count": len(candidates),
         "hoistable_count": sum(c["hoistable"] for c in candidates),
         "candidates": candidates,
     }
     Path(args.out).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print("RESULT_JSON:", json.dumps({k: out[k] for k in
-          ("pds_name", "downstream_workbooks", "candidate_count", "hoistable_count")},
+          ("pds_name", "downstream_workbooks", "downstream_workbooks_direct",
+           "candidate_count", "hoistable_count")},
           ensure_ascii=False))
 
 
