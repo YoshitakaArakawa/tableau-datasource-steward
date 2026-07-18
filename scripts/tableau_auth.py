@@ -386,8 +386,10 @@ def _cli_status() -> int:
     path = _cache_path()
     print(f"cache path: {path}")
     if not path.exists():
+        # 機械前チェック（バッチが実行可否を exit code で判定する）用に非 0 を返す。
+        # このまま signed_in_server() を呼ぶとブラウザ待ちでハングするため。
         print("status: no cached session")
-        return 0
+        return 1
     try:
         cache = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
