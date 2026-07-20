@@ -1,54 +1,41 @@
 # tableau-datasource-steward
 
-Tableau Server / Tableau Cloud 上の **Published Datasource** を「セマンティックレイヤー」として継続メンテナンスする作業を、Tableau の API 経由で代行・支援する Agent。配布形態は Agent パッケージだが、中核ロジックは Skill に固める。
+Tableau Server / Tableau Cloud の **Published Data Source (PDS)** を、組織のセマンティックレイヤーとして継続メンテする Agent。列の説明・粒度（grain）・計算フィールドといったメタデータの整備を、Claude Code 上の Skill 群が Tableau API 経由で肩代わりする。
+
+できることは大きく 2 つ。
+
+- **メタデータ整備バッチ**: 説明の無い列・現データと合わなくなった既存説明を検出し、草案を生成して PDS に一括反映する。反映後はライブカタログを読み直した HTML レポートで「実際に何が入ったか」を網羅確認できる
+- **計算フィールドの集約（hoist）**: 複数 workbook に重複するローカル計算フィールドを検出して PDS へ寄せ、説明も付けた上で、下流 workbook を書き換えて前後の view 描画を並置比較する
 
 ## 背景
 
-Tableau の Published Datasource は、実質的に組織のセマンティックレイヤーとして機能する。次を保持するためだ:
-
-- 指標（計算フィールド）の定義
-- Dimension / Measure の区別
-- 各列の意味（説明・コメント・フォルダ・デフォルト集計などのメタデータ）
-
-これは Tableau 公式ヘルプの記載でも裏付けられる。原文（一字一句）:
+Tableau の Published Data Source は、指標（計算フィールド）の定義、Dimension / Measure の区別、各列の意味（説明・デフォルト集計などのメタデータ）を保持する。実質的に組織のセマンティックレイヤーとして機能する。
 
 > "A published data source is the closest equivalent Tableau has to a semantic layer or semantic model."
 >
 > — [Understanding Salesforce and Data Cloud Terms — Tableau Help](https://help.tableau.com/current/online/en-us/tableau_next_sf_datacloud_terms.htm)
 
-この一文は Tableau Next / Data Cloud の用語解説ページにある。「Tableau Next の Semantic Model に対応する、従来 Tableau 側で最も近いもの = Published Datasource」という対比の文脈で書かれている。本リポジトリのスコープ確定の論拠そのものである。
+しかし、このメタデータを人間が手作業で保守し続けるのは辛い。データソースが増え列が増えるほど破綻する。そこを API で自動化・支援するのが本リポジトリのゴール。
 
-しかし、メタデータ整備や計算フィールド追加を人間が手作業で保守し続けるのは辛い。データソースが増え列が増えるほど破綻する。そこを API で自動化・支援する Agent を作るのが本リポジトリのゴール。
+## ワークフロー
 
-## スコープ
+### メタデータ整備バッチ
 
-**対象**: Tableau Server / Tableau Cloud の Published Datasource。古典的な Tableau Data Model（logical / physical layer を持つ `.tds` / `.tdsx` 系）が射程。
+対象範囲（project / PDS 名）を指定すると自走するバッチ。MCP / VDS が読む description を整備し、発見性を上げる。
 
-**対象外**: Tableau Next / Data 360 の「Tableau Semantics」「Semantic Model」。これは Salesforce のブランド製品名であり、別系統の API・オブジェクトモデルを持つ。
+1. **コスト見積もり**: `scripts/batch_augment.py estimate` で対象範囲の作業量（in-place で埋まる数 / republish が必要な数 / extract 総量）を先に算出し、重すぎる場合は絞り直しを促す
+2. **棚卸しと草案生成**: 説明の無い列・stale な既存説明・grain 未記載を検出し、各説明に出所（抽出 / 推論）を付けた change-set を作る
+3. **書き込み**: source 列の説明は Catalog に in-place 反映（PDS を作らない・触らない）。フィールド説明・grain はゲート付きの desc-only republish（`scripts/batch_augment.py run`、進捗 manifest 付きで再開可能）
+4. **レビュー面生成**: `scripts/metadata_report.py` が反映後のライブカタログを読み直し、PDS ごとの grain + 全列 description + カバレッジ集計を自己完結 HTML 1 枚に出力する。書いた spec ではなく読み直した実物を確認できる
 
-## 機能の核
+### 計算フィールドの集約（hoist）
 
-- 既存 Published Datasource の**メタデータを埋める／整える**: 列の説明、デフォルト集計、フォルダ構成、Dimension / Measure 整理など（デフォルト集計・フォルダ構成の反映は将来拡張）
-- **計算フィールドを作成・追加する**（指標定義をコードとして管理する発想）
-- それらを**再パブリッシュして反映する**
+下流 workbook に散らばった共通計算を PDS に集約し、説明まで一度に付けるワークフロー。
 
-全体として「人間が辛い保守を Agent が肩代わりする」体験を作る。
-
-## 命名
-
-Repo 名 = Agent 名を `tableau-datasource-steward` で統一する。
-
-- **steward**（継続して手入れする番人）= 自動メンテの主体性を表す
-- **datasource** を明示 = 対象が Server / Cloud の Published Datasource だと一目で分かり、Tableau Next の Semantic Model と誤読されない
-- **semantic** は不採用（前述のブランド衝突）。思想は本文の説明で表現する
-
-## 設計方針
-
-- Skill の作成・設計時は、着手前に必ず `/creating-skills` を参照する
-- 本リポジトリは将来 Public 化されうる前提で作る:
-  - 絶対パス・個人情報・実データを本文／コミット／サンプルに書かない
-  - 例示はダミー値にする
-  - LICENSE は MIT を既定で置く
+1. 下流 workbook を辿って重複計算フィールドを検出し、PDS へ寄せられるか（table calc や LOD の view 文脈依存がないか）を分類する
+2. 各計算フィールドの説明を生成し、別名の draft PDS（`…__augmented`）に注入して publish する
+3. 下流 workbook を rewired 版として publish し、書き換え前後の全 view を画像レンダリングして並置比較する
+4. 結果レビューと承認を経て、本番 PDS / workbook へ反映する（承認ゲートはここ）
 
 ## 構成
 
@@ -56,31 +43,60 @@ Repo 名 = Agent 名を `tableau-datasource-steward` で統一する。
 
 | Skill | 系統 | 役割 |
 |---|---|---|
-| `datasource-inspector` | READ | PDS の現状棚卸し |
-| `datasource-describer` | ANALYZE | 説明草案の生成と既存説明の検証 |
+| `datasource-inspector` | READ | PDS の現状棚卸し（列・既存 calc・grain・説明カバレッジ） |
+| `datasource-describer` | ANALYZE | 説明草案の生成と既存説明の検証（valid / stale） |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc 検出 |
 | `datasource-augmenter` | WRITE | change-set の注入・publish・round-trip 検証 |
 | `workbook-rewirer` | WRITE | 下流 workbook の PDS 付け替え・calc 参照差し替え・view 描画検証 |
 
 各 Skill の詳細な責務分担は [CLAUDE.md](CLAUDE.md) の Skill マップを正とする。
 
-共通モジュールは `scripts/`（OAuth サインインの `tableau_auth.py`、Metadata API クライアントの `metadata_api.py`）。
+共通モジュールは `scripts/` に置く。
 
-## 前提（Tableau MCP）
+| ファイル | 役割 |
+|---|---|
+| `scripts/tableau_auth.py` | OAuth (PKCE) サインイン。`status` サブコマンドで接続前チェック |
+| `scripts/metadata_api.py` | Metadata API (GraphQL) クライアント。読取の主経路 |
+| `scripts/batch_augment.py` | 整備バッチの orchestrator（コスト見積もり / 一括実行・再開） |
+| `scripts/metadata_report.py` | 反映結果のレビュー用 HTML レポート生成（読取専用） |
 
-読取系の一部で Tableau MCP を使う。**MCP サーバーの接続設定は利用者の Claude 環境側で用意する**（connector / user スコープ等）。本 repo は特定の接続を強制しないが、project スコープで設定したい場合の例として PAT/npx 版 `.mcp.json.template` を同梱する（`.mcp.json` にコピーし実値を差し替え。`.mcp.json` は gitignore 済み）。
+## 安全設計
 
-Skill は datasource 読取ツール（`get-datasource-metadata` / `query-datasource` / `list-datasources` 等）を提供する MCP サーバーが利用可能であることだけを前提にし、ツールは tool 名（基底名）で参照するのでサーバー名には依存しない。
+書き込みは対象ごとに方式を分け、破壊的操作の前だけ承認ゲートを置く。
 
-REST / Metadata API 用の認証（`scripts/`）は MCP とは別系統で、`.env`（`.env.template` を元に作成、gitignore 済み）で管理する。
+| 対象 | 方式 |
+|---|---|
+| source 列の説明 | Catalog in-place 更新（REST Update Column）。PDS を作らない・触らない。下流に `descriptionInherited` として継承される |
+| PDS のフィールド説明・grain | desc-only republish。差分が説明のみであることを publish 前に XML 比較で証明し、LUID 維持・round-trip を事後検証する。ゲートを 1 つでも通らなければ publish しない |
+| 計算フィールドの注入 | `CreateNew` で別名 draft を作る。本番反映（promote = Overwrite）は承認必須 |
+| workbook の書き換え | 既定 `CreateNew` で rewired 版を作る。本番 workbook の Overwrite は承認必須 |
 
-## 安全ポリシー
+draft には `…__augmented` / `…__rewired` のような接尾辞を付け、正式版と誤認されないようにする。承認ゲートの範囲・自走時の報告義務など詳細は [CLAUDE.md](CLAUDE.md) の横断ポリシーを正とする。
 
-- **publish は既定 `CreateNew`**: 別名で新規 PDS / workbook を作り、元を壊さない。`Overwrite` は破壊的（PDS なら下流 workbook を巻き込みうる。workbook なら本番 view を直接置換する）で、明示要求 + 影響の提示 + ユーザー承認がそろったときのみ。
-- **承認ゲートは破壊的操作の前**: Overwrite publish（PDS / workbook とも）/ 削除 / promote の前は必ず確認。読取・change-set 生成・CreateNew は非破壊。
-- **認証は OAuth**（PKCE）。読取系の一部は Tableau MCP を併用。
+## セットアップ
 
-承認ゲートの範囲・自走ユースケースでの扱いなど詳細は [CLAUDE.md](CLAUDE.md) の横断ポリシーを正とする。
+前提: Claude Code、Python 3、Tableau Server / Tableau Cloud のサイト。メタデータ整備（Catalog への書き込み・説明継承）には Data Management (Catalog) の有効化が必要。
+
+```sh
+pip install -r requirements.txt
+cp .env.template .env   # SERVER / SITE_NAME を実値に差し替え（.env は gitignore 済み）
+```
+
+認証は OAuth 2.0 (Authorization Code + PKCE) のブラウザサインインで、静的トークンを持たない。`python scripts/tableau_auth.py status` で接続状態を確認できる。
+
+あとはリポジトリを Claude Code で開き、「この project の列説明を整備して」のように依頼すれば、[CLAUDE.md](CLAUDE.md) が適切な Skill にルーティングする。
+
+### Tableau MCP（読取系の一部で併用）
+
+サンプル値取得などで Tableau MCP を使う。MCP サーバーの接続設定は利用者の Claude 環境側で用意する（connector / user スコープ等）。project スコープで設定したい場合の例として PAT/npx 版 `.mcp.json.template` を同梱している（`.mcp.json` にコピーして実値を差し替え。`.mcp.json` は gitignore 済み）。
+
+Skill は datasource 読取ツール（`get-datasource-metadata` / `query-datasource` / `list-datasources` 等）を提供する MCP サーバーが利用可能であることだけを前提にし、ツールを基底名で参照するためサーバー名には依存しない。
+
+## スコープと命名
+
+対象は Tableau Server / Tableau Cloud の Published Data Source。古典的な Tableau Data Model（logical / physical layer を持つ `.tds` / `.tdsx` 系）が射程。
+
+Tableau Next / Data 360 の「Tableau Semantics」「Semantic Model」は対象外。これは Salesforce のブランド製品名であり、別系統の API・オブジェクトモデルを持つ。リポジトリ名に semantic ではなく **datasource-steward**（datasource を継続して手入れする番人）を使うのは、このブランド衝突を避け、対象が Published Data Source だと一目で分かるようにするため。
 
 ## ライセンス
 
