@@ -87,10 +87,12 @@ def main():
 
     columns, calcs, pseudo, skip_candidates = [], [], [], []
     for f in ds["fields"]:
-        # GraphQL は論理テーブル自体を ColumnField として数える（名前がテーブル名と
-        # 一致し upstream 列を持たない）。実列ではないので除外リストへ。
+        # GraphQL は論理テーブル自体を ColumnField として数える。dataType=TABLE が
+        # 確定的な目印（Custom SQL は upstreamTables が空で名前一致が効かない）。
+        # 名前一致 + upstream 列なしは従来規則のフォールバック。実列ではないので除外。
         ups = f.get("upstreamColumns")
-        if (f["__typename"] == "ColumnField" and f["name"] in table_names and not ups):
+        if (f["__typename"] == "ColumnField" and not ups
+                and (f.get("dataType") == "TABLE" or f["name"] in table_names)):
             pseudo.append(f["name"])
             continue
         skip = classify_skip(f)

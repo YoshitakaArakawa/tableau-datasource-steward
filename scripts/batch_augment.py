@@ -53,6 +53,7 @@ query {
     fields {
       __typename name description
       ... on ColumnField {
+        dataType
         upstreamColumns { table { __typename name ... on DatabaseTable { luid } } }
       }
     }
@@ -86,8 +87,11 @@ def cmd_estimate(server, projects: set[str], names: set[str], luids: set[str],
         undescribed_cols, calc_undescribed, source_eligible = [], [], []
         for f in ds["fields"]:
             ups = f.get("upstreamColumns")
-            if f["__typename"] == "ColumnField" and f["name"] in table_names and not ups:
-                continue  # 論理テーブル擬似列
+            # 論理テーブル擬似列（dataType=TABLE が確定的目印。Custom SQL は
+            # upstreamTables が空になるため名前一致だけでは拾えない）
+            if (f["__typename"] == "ColumnField" and not ups
+                    and (f.get("dataType") == "TABLE" or f["name"] in table_names)):
+                continue
             if (f.get("description") or "").strip():
                 continue
             if f["__typename"] == "CalculatedField":

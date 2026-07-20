@@ -533,7 +533,7 @@ def main():
                                "query($l:String!){publishedDatasources(filter:{luid:$l})"
                                "{upstreamTables{name}"
                                "fields{name description __typename "
-                               "... on ColumnField{upstreamColumns{luid}}}}}",
+                               "... on ColumnField{dataType upstreamColumns{luid}}}}}",
                                {"l": published.id}).get("publishedDatasources") or []
                 if pubs and pubs[0]["fields"]:
                     fields = pubs[0]["fields"]
@@ -548,12 +548,14 @@ def main():
                           if f["__typename"] == "CalculatedField"}
             for c in spec.get("calcs", []):
                 calc_seen[c["caption"]] = c["caption"] in calc_names
-            # GraphQL は論理テーブル自体を ColumnField として数える（名前がテーブル名と
-            # 一致し upstream 列を持たない）。実列ではないので分母から除外する。
+            # GraphQL は論理テーブル自体を ColumnField として数える。dataType=TABLE が
+            # 確定的な目印（Custom SQL は upstreamTables が空で名前一致が効かない）。
+            # 実列ではないので分母から除外する。
             pseudo = sorted(f["name"] for f in fields
                             if f["__typename"] == "ColumnField"
-                            and f["name"] in upstream_tables
-                            and not (f.get("upstreamColumns") or []))
+                            and not (f.get("upstreamColumns") or [])
+                            and (f.get("dataType") == "TABLE"
+                                 or f["name"] in upstream_tables))
             cols = [f for f in fields
                     if f["__typename"] != "CalculatedField" and f["name"] not in pseudo]
             undescribed = sorted(f["name"] for f in cols
