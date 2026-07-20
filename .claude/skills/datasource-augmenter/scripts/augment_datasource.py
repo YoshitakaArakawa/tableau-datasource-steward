@@ -276,12 +276,16 @@ def _rest_get(server, path: str, params: dict | None = None):
     return r.json()
 
 
-def preflight_desc_only(server, source_luid: str) -> dict:
+def preflight_desc_only(server, source_luid: str, oauth_username: str | None = None) -> dict:
     """desc-only Overwrite を自走してよいかを機械判定する。
 
     - connections: embedPassword=true の接続があれば block。republish は connection
       オブジェクトを作り直すため、埋め込み資格情報は失われうる（資格情報を埋めない
-      PDS = extract / Published DS / 仮想接続入力なら影響なし）。
+      PDS = extract / Published DS / 仮想接続入力なら影響なし）。例外は spec が
+      `connection_credentials.oauth_username` で OAuth 再 embed を明示した場合:
+      publish 時に実行ユーザーの Saved Credential を embed し直せるため、
+      接続の userName が oauth_username と一致することを検証して続行する
+      （不一致は block。実行ユーザーの Saved Credential では認証できない）。
     - upstream flow: 実行中 (InProgress / Pending) の flow run があれば block。
       download→publish の間に flow が完走するとデータが巻き戻るため。
       次回スケジュール実行 (nextRunAt) が近い場合は warning（block はしない。
@@ -292,11 +296,25 @@ def preflight_desc_only(server, source_luid: str) -> dict:
 
     conns = (_rest_get(server, f"datasources/{source_luid}/connections")
              .get("connections", {}) or {}).get("connection", [])
-    embedded = [c["id"] for c in conns if str(c.get("embedPassword")).lower() == "true"]
-    pf["connections"] = {"n": len(conns), "embed_password": embedded}
-    if embedded:
+    embedded = [c for c in conns if str(c.get("embedPassword")).lower() == "true"]
+    pf["connections"] = {"n": len(conns), "embed_password": [c["id"] for c in embedded]}
+    if embedded and not oauth_username:
         pf["ok"] = False
-        pf["blocks"].append(f"embedPassword=true の接続あり: {embedded}")
+        pf["blocks"].append(
+            f"embedPassword=true の接続あり: {[c['id'] for c in embedded]}。"
+            "OAuth コネクタ（BigQuery / Google Drive 等）なら spec の"
+            " connection_credentials.oauth_username（= 接続の userName）を指定すると"
+            "実行ユーザーの Saved Credential を embed し直して republish できる。")
+    elif embedded and oauth_username:
+        mismatch = [c["id"] for c in embedded if c.get("userName") != oauth_username]
+        if mismatch:
+            pf["ok"] = False
+            pf["blocks"].append(
+                f"oauth_username {oauth_username!r} が接続の userName と不一致: {mismatch}。"
+                "実行ユーザーの Saved Credential では認証できないため中止。")
+        else:
+            pf["reembed"] = {"oauth_username": oauth_username,
+                             "connections": [c["id"] for c in embedded]}
 
     try:
         flows = (graphql(server,
@@ -339,6 +357,31 @@ def verify_tds(txt: str, spec: dict) -> dict:
     return checks
 
 
+# --- OAuth saved-credential re-embed --------------------------------------------
+def _oauth_credentials(spec: dict):
+    """spec の connection_credentials.oauth_username から publish 用の資格情報を作る。
+
+    OAuth コネクタ（BigQuery / Google Drive 等）の republish は connection を作り直す
+    ため embed 済み資格情報が失われる。publish リクエストに oauth=True / embed=True の
+    ConnectionCredentials を付けると、実行ユーザーの「保存済み認証情報 (Saved
+    Credentials)」がサーバー側で embed され直す（生トークンは API に流れない）。
+    前提: name = 接続の userName、かつその Saved Credential が実行ユーザー本人に
+    登録済み（初回のみ Tableau の Account Settings で UI 登録）。
+    """
+    username = (spec.get("connection_credentials") or {}).get("oauth_username")
+    if not username:
+        return None
+    return TSC.ConnectionCredentials(name=username, password="", embed=True, oauth=True)
+
+
+def verify_embed(server, published_luid: str) -> dict:
+    """publish 後に接続の embedPassword が維持されているかを REST 直読で検証する。"""
+    conns = (_rest_get(server, f"datasources/{published_luid}/connections")
+             .get("connections", {}) or {}).get("connection", [])
+    embedded = [str(c.get("embedPassword")).lower() == "true" for c in conns]
+    return {"connections": len(conns), "embed_password_all": bool(conns) and all(embedded)}
+
+
 # --- main ----------------------------------------------------------------------
 def rollback(spec_path: str, out_dir: str) -> None:
     """out-dir に保全した original.tdsx を元 PDS へ Overwrite 再 publish して巻き戻す。"""
@@ -352,10 +395,14 @@ def rollback(spec_path: str, out_dir: str) -> None:
         item.name = src_item.name
         if src_item.description:  # grain も元の値で戻す（publish 時にしか設定できない）
             item.description = src_item.description
+        creds = _oauth_credentials(spec)  # 巻き戻しも republish。embed を同様に保持する
         published = server.datasources.publish(
-            item, str(orig), mode=TSC.Server.PublishMode.Overwrite)
+            item, str(orig), mode=TSC.Server.PublishMode.Overwrite,
+            connection_credentials=creds)
         result = {"phase": "rollback", "published_luid": published.id,
                   "luid_preserved": published.id == spec["source_luid"]}
+        if creds:
+            result["embed_check"] = verify_embed(server, published.id)
         print("RESULT_JSON:", json.dumps(result, ensure_ascii=False))
         if not result["luid_preserved"]:
             raise SystemExit(2)
@@ -391,10 +438,13 @@ def main():
     # 人間の per-PDS 承認の代わりに preflight + diff ゲートで機械的に安全を証明する。
     desc_only = (mode == "Overwrite") and not spec.get("calcs")
 
+    oauth_creds = _oauth_credentials(spec)
+    oauth_username = oauth_creds.name if oauth_creds else None
+
     with signed_in_server() as server:
         preflight = None
         if desc_only:
-            preflight = preflight_desc_only(server, source_luid)
+            preflight = preflight_desc_only(server, source_luid, oauth_username)
             if not preflight["ok"]:
                 result = {"mode": mode, "desc_only": True, "preflight": preflight,
                           "verified": False, "aborted": "preflight"}
@@ -453,7 +503,8 @@ def main():
             item.description = ds_desc
         pub_mode = (TSC.Server.PublishMode.CreateNew if mode == "CreateNew"
                     else TSC.Server.PublishMode.Overwrite)
-        published = server.datasources.publish(item, str(edited_tdsx), mode=pub_mode)
+        published = server.datasources.publish(item, str(edited_tdsx), mode=pub_mode,
+                                               connection_credentials=oauth_creds)
 
         # verify round-trip
         ver_tdsx = Path(server.datasources.download(
@@ -524,6 +575,12 @@ def main():
         # project 解決を誤って重複 PDS を作っている（下流参照が繋がらない）。
         luid_preserved = (published.id == source_luid) if mode == "Overwrite" else None
 
+        # OAuth 再 embed を要求した publish は、embed が実際に維持されたかを REST 直読で
+        # 検証し verified の合否に含める（embed 喪失 = 次回リフレッシュが認証エラー）。
+        embed_check = None
+        if oauth_creds:
+            embed_check = verify_embed(server, published.id)
+
         result = {
             "published_luid": published.id,
             "published_name": published.name,
@@ -536,10 +593,12 @@ def main():
             "calc_registered_graphql": calc_seen,
             "coverage": coverage,
             "datasource_description_check": ds_desc_check,
+            "embed_check": embed_check,
             # calc survival is covered by post (.tds round-trip); calc_registered_graphql
             # is supplementary (subject to indexing lag) and excluded from verified.
             "verified": (all(post.values()) and all(ds_desc_check.values() or [True])
-                         and luid_preserved is not False),
+                         and luid_preserved is not False
+                         and (embed_check is None or embed_check["embed_password_all"])),
         }
         (out / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False),
                                          encoding="utf-8")

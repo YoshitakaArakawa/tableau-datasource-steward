@@ -23,11 +23,12 @@ Published Data Source (PDS) のメタデータを書き込む write エンジン
 ## publish ポリシー
 
 - **desc-only Overwrite（spec に `calcs` が無い Overwrite）は準非破壊**。スクリプトが自動で次の安全装置を適用し、すべて通過したときだけ publish する。per-PDS の人間承認は不要（承認は**バッチ単位で 1 回**、事後報告に集約）。
-  - preflight: `embedPassword=true` の接続があれば中止（republish は connection を作り直すため）。実行中の upstream flow run があれば中止（データ巻き戻り防止）。次回スケジュール実行が近ければ warning。
+  - preflight: `embedPassword=true` の接続があれば中止（republish は connection を作り直すため）。例外は spec の `connection_credentials.oauth_username` で OAuth 再 embed を明示した場合で、接続の userName 一致を検証して続行する。実行中の upstream flow run があれば中止（データ巻き戻り防止）。次回スケジュール実行が近ければ warning。
   - XML diff ゲート: 編集差分が `<desc>`（と desc を載せるための合成 `<column>` 殻）に限られることを canonical XML 比較で publish 前に機械証明。それ以外の差分が 1 つでもあれば publish せず中止。
   - LUID 検証: Overwrite は「名前 + プロジェクト」一致で LUID を保持する。別 LUID になったら失敗として扱う（`luid_preserved`）。
 - **CreateNew は calc 注入の既定**。別名 draft（例 `…__augmented`）を作り、元を壊さない。本番への反映（promote / calc 込み Overwrite）は**明示要求 + 下流影響の提示 + ユーザー承認**がそろったときのみ。
 - **grain は publish 時にしか設定できない**。Overwrite で spec に `datasource.description` が無ければ既存 grain を読んで引き継ぐ（消さない）。
+- **OAuth コネクタ（BigQuery / Google Drive 等）の republish は embed 済み資格情報を失う**。spec の `connection_credentials.oauth_username` を指定すると、publish 時に実行ユーザーの Saved Credential を embed し直し（生トークンは API に流れない）、publish 後に `embed_check` で維持を検証して `verified` の合否に含める。前提・制約は [references/change-set-format.md](references/change-set-format.md) を参照。
 - **巻き戻し**: republish 経路は `--rollback`（保全済み `original.tdsx` を Overwrite 再 publish）、source 列経路は `rollback` サブコマンド（記録済みの元値へ逆適用）、CreateNew draft は `cleanup_drafts.py`（ガード付き削除）。
 
 ## スコープ
