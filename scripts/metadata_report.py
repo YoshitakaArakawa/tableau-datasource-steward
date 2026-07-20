@@ -94,11 +94,20 @@ def build_html(rows: list[dict], scope_label: str, generated_at: str) -> str:
 
     total_cols = sum(r["n_cols"] for r in rows)
     total_desc = sum(r["n_described"] for r in rows)
+    total_calcs = sum(r["n_calcs"] for r in rows)
+    total_calcs_desc = sum(r["n_calcs_described"] for r in rows)
     grain_ok = sum(1 for r in rows if r["grain"])
+
+    def has_gap(r):  # calc も記述対象（セマンティックレイヤーの一部）として gap に数える
+        return (r["n_undescribed"] > 0 or not r["grain"]
+                or r["n_calcs_described"] < r["n_calcs"])
+
     toc = "".join(
-        f'<li class="{"" if (r["n_undescribed"] == 0 and r["grain"]) else "miss"}">'
+        f'<li class="{"miss" if has_gap(r) else ""}">'
         f'<a href="#{esc(r["luid"])}">{esc(r["name"])}</a>'
-        f' ({r["n_described"]}/{r["n_cols"]})</li>'
+        f' ({r["n_described"]}/{r["n_cols"]}'
+        + (f' +calc {r["n_calcs_described"]}/{r["n_calcs"]}' if r["n_calcs"] else "")
+        + ')</li>'
         for r in rows)
 
     sections = []
@@ -127,6 +136,7 @@ def build_html(rows: list[dict], scope_label: str, generated_at: str) -> str:
         f'<div class="meta">スコープ: {esc(scope_label)} ・ 生成: {esc(generated_at)}（ライブカタログを GraphQL で読取）</div>'
         f'<div class="tally"><span>PDS <b>{len(rows)}</b></span>'
         f'<span>実列 <b>{total_desc}</b>/{total_cols} 記述</span>'
+        f'<span>calc <b>{total_calcs_desc}</b>/{total_calcs} 記述</span>'
         f'<span>grain <b>{grain_ok}</b>/{len(rows)} 設定</span></div>'
         f'<ol class="toc">{toc}</ol>'
         + "".join(sections))
@@ -157,16 +167,18 @@ def main():
         fields, excluded = [], []
         for f in sorted(d.get("fields") or [], key=lambda x: x["name"].lower()):
             is_calc = f["__typename"] == "CalculatedField"
-            # 論理テーブル自体を指す擬似列（テーブル名と一致し upstream 列を持たない）は
-            # 記述対象外。分母から除外して別掲する（augmenter の coverage と同じ規則）
-            if (not is_calc and f["name"] in upstream
-                    and not (f.get("upstreamColumns") or [])):
+            # 論理テーブル自体を指す擬似列は記述対象外。dataType=TABLE が確定的目印
+            # （Custom SQL は upstreamTables が空で名前一致が効かない）。分母から除外
+            # して別掲する（inspector / augmenter の coverage と同じ規則）
+            if (not is_calc and not (f.get("upstreamColumns") or [])
+                    and (f.get("dataType") == "TABLE" or f["name"] in upstream)):
                 excluded.append(f["name"])
                 continue
             fields.append({"name": f["name"], "is_calc": is_calc,
                            "dataType": f.get("dataType") or "",
                            "description": (f.get("description") or "").strip()})
         cols = [f for f in fields if not f["is_calc"]]
+        calcs = [f for f in fields if f["is_calc"]]
         rows.append({
             "luid": d["luid"], "name": d["name"], "project": d.get("projectName") or "",
             "grain": (d.get("description") or "").strip(),
@@ -174,6 +186,8 @@ def main():
             "n_cols": len(cols),
             "n_described": sum(1 for f in cols if f["description"]),
             "n_undescribed": sum(1 for f in cols if not f["description"]),
+            "n_calcs": len(calcs),
+            "n_calcs_described": sum(1 for f in calcs if f["description"]),
         })
     rows.sort(key=lambda r: (r["project"], r["name"].lower()))
     if not rows:
@@ -190,9 +204,13 @@ def main():
         "n_pds": len(rows),
         "columns_described": sum(r["n_described"] for r in rows),
         "columns_total": sum(r["n_cols"] for r in rows),
+        "calcs_described": sum(r["n_calcs_described"] for r in rows),
+        "calcs_total": sum(r["n_calcs"] for r in rows),
         "grain_set": sum(1 for r in rows if r["grain"]),
+        # calc も記述対象（セマンティックレイヤーの一部）として gap に数える
         "pds_with_gaps": [r["name"] for r in rows
-                          if r["n_undescribed"] or not r["grain"]],
+                          if r["n_undescribed"] or not r["grain"]
+                          or r["n_calcs_described"] < r["n_calcs"]],
     }
     print("RESULT_JSON:", json.dumps(summary, ensure_ascii=False))
 
