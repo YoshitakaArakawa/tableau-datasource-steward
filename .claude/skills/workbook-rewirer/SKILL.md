@@ -93,3 +93,4 @@ OAuth（`scripts/tableau_auth.py` の `signed_in_server()`）。GraphQL は `scr
 | スクリプト | 役割 |
 |---|---|
 | `scripts/rewire_workbook.py` | spec を読み download → .twb 編集（repoint + calc 差し替え）→ publish → view 描画検証を一気通貫実行。終了時に `RESULT_JSON` を emit し `result.json` を書く |
+| `scripts/render_downstream.py` | promote（PDS Overwrite）後の下流一斉描画確認。`--pds-luid <PDS LUID> --out-dir <dir>` で全下流 workbook の全 view を fresh render し、ok / error を `result.json` + `RESULT_JSON` に集計する（純読取・publish なし） |
