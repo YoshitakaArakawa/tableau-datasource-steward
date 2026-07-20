@@ -65,7 +65,7 @@ PDS への calc hoist だけでは下流 workbook は何も変わらない。ロ
 - [ ] `candidate_export_failed` の view があれば `out-dir` の `original.twb` / `edited.twb` を diff し、参照切れ（token 置換漏れ）か repoint 不備（dbname / content_url）かを切り分け
 - [ ] 対象 workbook が複数あるときは workbook ごとに spec を作って繰り返し、報告にまとめる
 
-スクリプトは編集前の `original.twb(x)` を必ず保存する（revert 用）。
+スクリプトは編集前の `original.twb(x)` と巻き戻しメタ `rollback.json` を必ず out-dir に保存する。Overwrite を巻き戻すときは `rewire_workbook.py --rollback --out-dir <dir>`（原本を元の name / project へ Overwrite 再 publish し、LUID 維持を検証。詳細は [references/rewire-spec-format.md](references/rewire-spec-format.md)）。
 
 ## XML 編集の要点
 

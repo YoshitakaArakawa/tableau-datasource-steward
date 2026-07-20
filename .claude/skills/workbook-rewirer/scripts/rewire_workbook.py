@@ -13,6 +13,12 @@ while dashboard images draw every sheet they contain.
 
 usage:
     python rewire_workbook.py --spec spec.json --out-dir <dir>
+    python rewire_workbook.py --rollback --out-dir <dir>
+
+A normal run preserves the pristine workbook (original.twb/.twbx) plus a
+rollback.json (name / project / show_tabs / LUID at run time) in out-dir;
+--rollback republishes that original over the source workbook (Overwrite) and
+verifies the LUID survived (exit 2 otherwise). No --spec needed for rollback.
 
 Auth: OAuth (scripts/tableau_auth.py, signed_in_server()). Spec format:
     ../references/rewire-spec-format.md
@@ -29,6 +35,12 @@ import sys
 import time
 import zipfile
 from pathlib import Path
+
+# Windows コンソール (cp932) は日本語 workbook / view 名を化けさせ、RESULT_JSON の
+# 照合を壊す。stdout/stderr を UTF-8 に固定する（augment_datasource.py と同じ措置）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 
 # --- locate shared modules in the repo-root scripts/ directory -----------------
@@ -288,12 +300,61 @@ def find_pds_block(txt: str, source_content_url: str | None,
     return cands[0]
 
 
+# --- rollback -------------------------------------------------------------------
+def write_rollback_meta(out: Path, src_wb, wb_path: Path) -> dict:
+    """Preserve what --rollback needs to undo an Overwrite: the identity of the
+    source workbook AS OF THIS RUN (name / project may drift later) and which
+    original file was saved (TSC picks the .twb/.twbx extension on download)."""
+    meta = {
+        "workbook_luid": src_wb.id,
+        "name": src_wb.name,
+        "project_id": src_wb.project_id,
+        "show_tabs": bool(src_wb.show_tabs),
+        "original_file": wb_path.name,
+    }
+    (out / "rollback.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    return meta
+
+
+def rollback(out_dir: str) -> None:
+    """out-dir に保全した原本 .twb(x) を元 workbook へ Overwrite 再 publish して巻き戻す。"""
+    out = Path(out_dir)
+    meta_path = out / "rollback.json"
+    if not meta_path.exists():
+        raise SystemExit(f"rollback.json not found in {out_dir}"
+                         " (written by a normal run; nothing to roll back)")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    orig = out / meta["original_file"]
+    if not orig.exists():
+        raise SystemExit(f"original workbook {meta['original_file']!r} not found in {out_dir}")
+    with signed_in_server() as server:
+        item = TSC.WorkbookItem(meta["project_id"])
+        item.name = meta["name"]
+        item.show_tabs = bool(meta["show_tabs"])
+        published = server.workbooks.publish(
+            item, str(orig), mode=TSC.Server.PublishMode.Overwrite)
+        result = {"phase": "rollback", "published_luid": published.id,
+                  "luid_preserved": published.id == meta["workbook_luid"]}
+        print("RESULT_JSON:", json.dumps(result, ensure_ascii=False))
+        if not result["luid_preserved"]:
+            raise SystemExit(2)
+
+
 # --- main -----------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--spec", required=True)
+    ap.add_argument("--spec")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--rollback", action="store_true",
+                    help="out-dir の原本 .twb(x) を元 workbook へ Overwrite 再 publish して巻き戻す")
     args = ap.parse_args()
+
+    if args.rollback:
+        rollback(args.out_dir)
+        return
+    if not args.spec:
+        ap.error("--spec is required unless --rollback")
 
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     out = Path(args.out_dir)
@@ -328,6 +389,7 @@ def main():
             src_wb.id, filepath=str(out / "original"), include_extract=True))
         twb_name, txt, src_zip = read_document(wb_path, ".twb")
         (out / "original.twb").write_text(txt, encoding="utf-8")
+        write_rollback_meta(out, src_wb, wb_path)  # enables --rollback later
 
         # baseline renders BEFORE any edit: the untouched original is the
         # reference the rewired copy is compared against

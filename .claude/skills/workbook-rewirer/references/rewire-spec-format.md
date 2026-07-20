@@ -1,5 +1,5 @@
 ---
-purpose: rewire_workbook.py に渡す spec (JSON) の全フィールド定義
+purpose: rewire_workbook.py の入出力契約（spec / result.json / rollback.json）の全フィールド定義
 note: 例の値はすべてダミー。1 spec = 1 workbook。複数 workbook を書き換えるときは workbook ごとに spec を作って個別に実行する
 ---
 
@@ -43,3 +43,9 @@ note: 例の値はすべてダミー。1 spec = 1 workbook。複数 workbook を
 | `view_compare` | view ごとの前後 render 結果（`views[]` の verdict: `ok` / `candidate_export_failed` / `baseline_export_failed` / `export_failed` / `only_in_one_workbook`）と集計 `tally`。画像並置は `compare/view-compare.html` |
 | `graphql_checks` | 補助チェック（upstream / embedded calc）。インデックス遅延時は `_note` |
 | `verified` | `roundtrip_checks` 全通過 かつ `view_compare` にブロック verdict（`candidate_export_failed` / `export_failed` / `only_in_one_workbook`）なし。画像内容の同値は目視確認の領分で合否に含めない |
+
+## 巻き戻し（rollback.json）
+
+通常実行は out-dir に原本 `original.twb(x)` と `rollback.json` を保全する。フィールドは `workbook_luid`（rewire 元 workbook）/ `name` / `project_id` / `show_tabs`（いずれも実行時点の値）/ `original_file`（保存された原本のファイル名。.twb か .twbx）。
+
+`rewire_workbook.py --rollback --out-dir <dir>` はこれを読み、原本を元の name / project へ Overwrite 再 publish する（`--spec` 不要）。LUID 維持（`published.id == workbook_luid`）を検証し、不一致なら exit 2。出力は `RESULT_JSON:` 行（`phase: "rollback"` / `published_luid` / `luid_preserved`）。
