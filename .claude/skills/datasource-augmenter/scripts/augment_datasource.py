@@ -174,11 +174,44 @@ def calc_block(idx: int, caption: str, formula: str, datatype: str,
     )
 
 
+def _existing_display_names(txt: str) -> set[str]:
+    """.tds 中の全 <column> の表示名を XML-escaped のまま集める。
+
+    caption='X' があればそれが表示名。caption が無い列は name='[X]' が表示名を兼ねる
+    （caption は display 名と内部名が違うときだけ存在する）。calc 列に限定しないのは、
+    Tableau が同一 caption の列を区別できないため（通常列との衝突も注入不可）。
+    """
+    names: set[str] = set()
+    for m in re.finditer(r"<column\b[^>]*>", txt):
+        tag = m.group(0)
+        cap = re.search(r"\bcaption='([^']*)'", tag)
+        if cap:
+            names.add(cap.group(1))
+        else:
+            name = re.search(r"\bname='\[([^']*)\]'", tag)
+            if name:
+                names.add(name.group(1))
+    return names
+
+
 def inject_calcs(txt: str, calcs: list[dict]) -> str:
     if not calcs:
         return txt
+    # 冪等性ガード: promote 再実行や部分失敗後のリトライで同一 calc を重複注入しない。
+    # 1 件でも衝突があれば、どの calc も注入せずに全体を止める（部分適用を作らない）。
+    existing = _existing_display_names(txt)
+    dup = [c["caption"] for c in calcs if _xml_escape(c["caption"]) in existing]
+    if dup:
+        raise SystemExit(
+            "calc caption が既に PDS に存在する: "
+            + ", ".join(repr(d) for d in dup)
+            + "。promote / 注入済みでないか確認せよ。再実行なら該当 calc を spec から除外する。")
+    # 内部名 [Calculation_steward_N] は既存最大 N の続番から振る（内部名の衝突回避）
+    start = 1 + max(
+        (int(n) for n in re.findall(re.escape(CALC_NAME_PREFIX) + r"(\d+)\]", txt)),
+        default=0)
     blocks = ""
-    for i, c in enumerate(calcs, start=1):
+    for i, c in enumerate(calcs, start=start):
         role = c.get("role") or _role_type(c["datatype"])[0]
         type_ = c.get("type") or _role_type(c["datatype"])[1]
         blocks += calc_block(i, c["caption"], c["formula"], c["datatype"],
