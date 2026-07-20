@@ -457,21 +457,24 @@ def main():
         orig_tdsx = Path(server.datasources.download(
             source_luid, filepath=str(out / "original"), include_extract=True))
         tds_name, txt, src_zip = read_tds(orig_tdsx)
-        (out / "original.tds").write_text(txt, encoding="utf-8")
+        orig_txt = txt  # diff ゲートの比較元。ディスク経由にしない（下記 newline 注記）
+        # evidence の .tds は newline='' で無変換書き出し。既定の write_text は Windows で
+        # \n→\r\n 変換するため、CRLF の .tds が \r\r\n に化け、Custom SQL 等の複数行
+        # text node を持つ PDS で読み戻しテキストが原本と一致しなくなる。
+        (out / "original.tds").write_text(txt, encoding="utf-8", newline="")
 
         # edits
         for d in spec.get("descriptions", []):
             txt = inject_description(txt, d["field_caption"], d["text"])
         txt = inject_calcs(txt, spec.get("calcs", []))
-        (out / "edited.tds").write_text(txt, encoding="utf-8")
+        (out / "edited.tds").write_text(txt, encoding="utf-8", newline="")
         pre = verify_tds(txt, spec)
         if not all(pre.values()):
             raise SystemExit(f"pre-publish edit incomplete: {pre}")
 
         diff_gate = None
         if desc_only:
-            diff_gate = desc_only_diff_gate(
-                (out / "original.tds").read_text(encoding="utf-8"), txt)
+            diff_gate = desc_only_diff_gate(orig_txt, txt)
             if not diff_gate["ok"]:
                 result = {"mode": mode, "desc_only": True, "preflight": preflight,
                           "diff_gate": diff_gate, "verified": False, "aborted": "diff_gate"}
@@ -510,7 +513,7 @@ def main():
         ver_tdsx = Path(server.datasources.download(
             published.id, filepath=str(out / "verified"), include_extract=False))
         _, v_txt, _ = read_tds(ver_tdsx)
-        (out / "verified.tds").write_text(v_txt, encoding="utf-8")
+        (out / "verified.tds").write_text(v_txt, encoding="utf-8", newline="")
         post = verify_tds(v_txt, spec)
 
         # Supplementary GraphQL check (subject to Metadata API indexing lag): confirm
