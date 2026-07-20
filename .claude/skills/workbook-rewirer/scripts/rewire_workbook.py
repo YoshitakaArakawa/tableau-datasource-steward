@@ -36,6 +36,12 @@ import time
 import zipfile
 from pathlib import Path
 
+# Windows コンソール (cp932) は日本語 workbook / view 名を化けさせ、RESULT_JSON の
+# 照合を壊す。stdout/stderr を UTF-8 に固定する（augment_datasource.py と同じ措置）。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 # --- locate shared modules in the repo-root scripts/ directory -----------------
 def _find_repo_scripts() -> Path:
