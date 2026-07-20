@@ -87,6 +87,7 @@ Published Data Source (PDS) のメタデータを書き込む write エンジン
 - field の特定は **caption='X' または name='[X]'** の両対応。caption は display 名と内部名が違うときだけ存在し、等しいと省略される。
 - description は `<column>` 子の `<desc><formatted-text><run>テキスト</run></formatted-text></desc>`。既存 desc は置換する。
 - calc は `<aliases .../>` 直後に `<column><calculation class='tableau' formula='...'/></column>` を sibling として注入。formula は XML escape する。
+- calc 注入は冪等性ガード付き：spec の caption が既存 column の表示名と衝突したら 1 件も注入せず停止し（重複注入防止）、内部名 `[Calculation_steward_N]` は既存最大 N の続番を振る。
 
 ## 検証の注意
 
