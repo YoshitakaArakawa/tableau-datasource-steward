@@ -22,3 +22,6 @@ __pycache__/
 *.tdsx
 *.tds
 *.hyper
+
+# Playwright MCP のログとスナップショット
+.playwright-mcp/
