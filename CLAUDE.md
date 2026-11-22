@@ -40,11 +40,12 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 
 1. **コスト見積もりゲート**: `scripts/batch_augment.py estimate` で per-PDS の「source 列経路で埋まる数 / republish 必至の数 / extract 総量」を算出。`heavy` なら「全部やると大変」を提示して対象の絞り直しを促す
 2. `datasource-inspector`（`read_schema.py`）→ `datasource-describer` で説明草案を作り、**source 列経路の updates** と **republish 経路の change-set** に振り分ける（1:1 対応は inspector の `upstream_1to1` と augmenter の `resolve` が判定）。既存 desc の `misplaced` は「それは何か」だけ残す修正草案にし、切り出した使い方は `bp_candidates[]`、既定の集計の不一致は `structure_findings[]` に出す
-3. 書き込み（**バッチ実行の宣言 1 回で自走。per-PDS の事前確認は置かない**）:
-   - source 列 desc → `update_source_column_descs.py apply`（in-place。PDS を作らない・触らない）
-   - field desc / grain → `batch_augment.py run`（desc-only Overwrite。preflight + diff ゲート + LUID 検証を各 PDS で機械適用、manifest で再開可能）
-   - `bp_candidates[]` → `knowledge-curator` で台帳に足し、Knowledge に同期（create / update は同じ宣言で自走。delete は承認必須）
-   - 書き込みの後に `knowledge-curator` の点検を回し、BP の参照切れと二重定義を確かめる
+3. 書き込み（**バッチ実行の宣言 1 回で自走。per-PDS の事前確認は置かない**）。**BP を先に、説明を後に書く**:
+   1. `bp_candidates[]` → `knowledge-curator` で台帳に足し、Knowledge に同期する（create / update は同じ宣言で自走。点検の error / unknown がある項目は `blocked` で書かない。delete は承認必須）
+   2. `misplaced` の修正草案のうち、`moved_to` の BP がすべて同期後のスナップショットで確認できたものだけを残す。残らなかったものは change-set から外し、報告で原文と理由を示す
+   3. source 列 desc → `update_source_column_descs.py apply`（in-place。PDS を作らない・触らない）
+   4. field desc / grain → `batch_augment.py run`（desc-only Overwrite。preflight + diff ゲート + LUID 検証を各 PDS で機械適用、manifest で再開可能）
+   5. 書き込みの後に `knowledge-curator` の点検を回し、BP の参照切れと二重定義を確かめる
 4. **成果物レビュー面の生成**: 反映後に `scripts/metadata_report.py --projects <対象>` で**ライブカタログを読み直した** HTML レポート（per-PDS の grain + 全列 description + coverage 集計）を生成し、報告に添える。ユーザーが Tableau GUI を巡回せずに「実際に何が入ったか」を網羅確認できる面を必ず用意する（書いた spec ではなく読み直した実物を示す）
 5. **orchestrator 報告**: 本文は**要約と判断点のみ**（verified 集計、gate_failed / abort の理由、`inferred` で確信度の低いもの、`misplaced` で説明から移した文と行き先、BP の create / update 件数と点検の error、`structure_findings`（既定の集計は現状は指摘のみ）、rollback 手順、レビュー面への参照）。全 luid・全変更の一覧は `work/` にファイル出力し、本文に列挙しない。折りたたみ目的で HTML `<details>` を使わない（ターミナルの Markdown では描画されない）
 
@@ -94,7 +95,7 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 | calc 注入 | `CreateNew` で別名 draft（例 `…__augmented`）を作る | draft 作成は自走可。本番反映（promote）は承認必須 |
 | 内容変更を伴う Overwrite（promote 含む） | 破壊的（下流 workbook を巻き込みうる） | **明示要求 + 影響の提示 + ユーザー承認** |
 | workbook（rewirer） | 既定 `CreateNew`（rewired 版）。本番 WB の Overwrite は破壊的 | draft 作成は自走可。本番 Overwrite は承認必須 |
-| Knowledge の BP | Tableau MCP `manage-knowledge-context` のみ。draft は無く、書いた時点で全員に効く | create / update はバッチ宣言 1 回で自走可（事後報告に contextId と取り消し手順を載せる）。delete は対象を示して承認必須 |
+| Knowledge の BP | Tableau MCP `manage-knowledge-context` のみ。draft は無く、書いた時点で全員に効く | create / update はバッチ宣言 1 回で自走可。ただし点検（参照切れ）で error / unknown が0件の項目に限る（機械ゲート）。書き込み前のスナップショットを取り消しの基準として保存し、事後報告に contextId と取り消し手順を載せる。delete は対象を示して承認必須 |
 
 desc-only Overwrite が準非破壊と言えるのは、人間の目視承認を機械証明に置き換えているため: 差分が `<desc>` に限られることを publish 前に XML 比較で証明し、LUID 維持・grain 継承・round-trip を事後検証する。ゲートを 1 つでも通らなければ publish しない。
 

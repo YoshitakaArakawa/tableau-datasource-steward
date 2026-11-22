@@ -79,7 +79,9 @@ BP は「どう使うか」を組織で共有する決まり。次の4種だけ�
       "target_node_id": null,
       "depends_on": ["Fiscal Month in rpt_acme__billing"],
       "context_id": "CONTEXT_ID_PLACEHOLDER",
-      "synced_statement": "For Finance questions, ..."
+      "synced_statements": ["For Finance questions, ..."],
+      "synced_name": "Term: Fiscal periods for Finance questions",
+      "synced_scope": ["global", null]
     }
   ]
 }
@@ -87,14 +89,23 @@ BP は「どう使うか」を組織で共有する決まり。次の4種だけ�
 
 | キー | 書く人 | 意味 |
 |---|---|---|
-| `kind` / `name` / `statement` | 人 / describer の `bp_candidates[]` | BP 本体。`name` が同期の照合キー |
+| `kind` / `name` | 人 / describer の `bp_candidates[]` | `name` が同期の照合キー |
+| `statement` または `statements` | 人 / describer の `bp_candidates[]` | BP 本体。1本なら `statement`、Knowledge 側で複数に分かれている context は `statements`（配列） |
 | `translation` / `rationale` | 人 | 訳と理由。Knowledge には送らない |
 | `scope` / `target_node_id` | 人 | `global`（既定）か `node` |
 | `depends_on` | `refs --write-back` | statement から抜いた参照名。手で書かない |
-| `context_id` / `synced_statement` | `plan --write-back` | 最後に Knowledge と一致を確認した文面。3方向比較の基準 |
-| `translation_stale` | `plan --write-back` | Knowledge 側の編集を取り込んだので訳が古い |
+| `context_id` / `synced_statements` / `synced_name` / `synced_scope` | `plan --write-back` / `init` | 最後に Knowledge と一致を確認した値。文面・名前・scope それぞれの3方向比較の基準 |
+| `translation_stale` | `plan --write-back` | Knowledge 側の文面の編集を取り込んだので訳が古い |
 
-セットアップ用の `title` / `text` 形式の JSON も、`name` / `statement` として読める。
+セットアップ用の `title` / `text` 形式の JSON もそのまま読める。書き戻しても元のキーの形を保つ。
+
+3方向比較の結果（`plan`）:
+
+| 台帳 | Knowledge | 判定 |
+|---|---|---|
+| 同期時のまま | 変わった | `pull`（台帳に取り込む。正本は Knowledge） |
+| 変わった | 同期時のまま | `update`（Knowledge に押し出す） |
+| 変わった | 変わった（または未同期で値が違う） | `conflict` |
 
 ## 点検結果の意味
 
@@ -103,9 +114,10 @@ BP は「どう使うか」を組織で共有する決まり。次の4種だけ�
 | status | 重さ | 意味と直し方 |
 |---|---|---|
 | `ok` | ok | 実在する |
-| `missing_datasource` | error | データソースが無い（改名・削除）。新しい名前に直すか、BP を廃止する |
+| `missing_datasource` | error | データソースが無い（改名・削除）、または glob に一致するデータソースが無い。新しい名前に直すか、BP を廃止する |
 | `missing_field` | error | フィールドが無い。新しいキャプションに直す |
 | `unresolved` | error | データソースでもなく、同じ文にデータソースの参照も無い名前。`in` で修飾する |
+| `unknown_fields` | unknown | 保存済みカタログに、その PDS のフィールドが無く判定できない。オンラインで再実行する |
 | `ambiguous_field` | warning | 同名の列（`X` と `X (...)`）がある。意図した方を正確な名前で書いたか確かめる |
 | `unqualified_field` | warning | `in` の修飾が無い。修飾を足す |
 | `duplicate_datasource_name` | warning | 同じ名前の PDS が複数プロジェクトにある。どれを指すかは名前だけでは決まらない |
@@ -113,3 +125,7 @@ BP は「どう使うか」を組織で共有する決まり。次の4種だけ�
 | `unquoted_datasource` / `unquoted_field` | warning | 実在する名前がバッククォートの外に出ている。引用する |
 
 `field_descriptions` は、参照先フィールドの現在の説明。二重定義の判定材料に使う。
+
+error か unknown が1件でもある台帳項目は、`plan --check` で `blocked` になり、create / update されない。
+
+`--text-file` で渡した Markdown は台帳より緩く扱う。fenced code と二重バッククォートの例示を除き、実在する名前・glob に一致した引用と `` `X` in `Y` `` だけを参照とみなす。そのため `unresolved` は出ない。

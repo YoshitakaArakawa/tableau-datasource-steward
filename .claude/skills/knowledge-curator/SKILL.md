@@ -10,12 +10,14 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 **最優先の規範**:
 - BP の文面の正本は Knowledge。台帳は訳・理由・依存を添えた写しで、同期のたびに Knowledge と3方向比較する。
 - Knowledge への書き込みは Tableau MCP の `manage-knowledge-context` だけで行う。REST や独自クライアントで書かない。
-- BP の削除（`action: delete`）は、対象の statement と contextId を示してユーザーの承認を得てから行う。create / update は、バッチ実行の宣言に含めて自走してよい。
+- create / update は、バッチ実行の宣言に含めて自走してよい。ただし点検（`check`）で error / unknown が0件の項目だけを書く。Knowledge には draft が無く、書いた時点で全員に効くため、この機械ゲートを外さない。
+- BP の削除（`action: delete`）は、対象の statement と contextId を示してユーザーの承認を得てから行う。
+- 書き込みの前に必ず Knowledge のスナップショットを保存する。これが取り消しの基準になる。
 - BP の書式（名前のバッククォート・1件1判断・kind）は [references/bp-format.md](references/bp-format.md) に従う。
 
 ## 入力
 
-- **台帳**: 利用者のリポジトリにある BP 台帳 JSON（スキーマは bp-format）。無ければ、`inspect-knowledge-context` の `list` から作る。
+- **台帳**: 利用者のリポジトリにある BP 台帳 JSON（スキーマは bp-format）。無ければ、スナップショットから `knowledge_ledger.py init` で作る。
 - **BP 候補**: datasource-describer の change-set の `bp_candidates[]`。台帳の item と同じ形なので、そのまま台帳に足せる。
 - **点検対象のテキスト**（任意）: スキル等の Markdown。BP と同じ書式で名前を引用している前提で、参照切れだけを見る。
 
@@ -34,15 +36,16 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 進捗:
 - [ ] `inspect-knowledge-context`（`action: status`）で対象グラフを確かめる。台帳の `graph_id` が null なら primary を使う
-- [ ] `inspect-knowledge-context`（`action: list`, `isGlobal` なし, `limit: 100`）で全 context を読み、JSON で `work/<yyyymmdd>_<tag>/knowledge_snapshot.json` に保存する。`resultInfo.truncated` が true なら、`nodeId` / `isGlobal` で分けて読み、全件そろうまで続ける
-- [ ] `knowledge_ledger.py plan --ledger <台帳> --snapshot <snapshot> --out <plan.json>` で計画を作る
+- [ ] `inspect-knowledge-context`（`action: list`, `isGlobal` なし, `limit: 100`）で全 context を読み、JSON で `work/<yyyymmdd>_<tag>/knowledge_snapshot_before.json` に保存する（既存ファイルを上書きしない）。`resultInfo.truncated` が true なら、`nodeId` / `isGlobal` で分けて読み、別ファイルに保存して `--snapshot` を重ねて渡す
+- [ ] モード3の `check` を台帳に対して回し、`check.json` を作る
+- [ ] `knowledge_ledger.py plan --ledger <台帳> --snapshot <before> [--snapshot ...] --check <check.json> --out <plan.json>` で計画を作る
 - [ ] 計画の action ごとに処理する:
-  - `create`: `manage-knowledge-context`（`action: create`, `name`, `statements: [{statement}]`, `isGlobal: true` または `targetNodeId`）
-  - `update`: `manage-knowledge-context`（`action: update`, `contextId`, `statements`）
-  - `rename`: `manage-knowledge-context`（`action: update`, `contextId`, `name`）
-  - `pull`: 書き込まない。Knowledge 側の編集を台帳に取り込む（次の write-back で反映）
+  - `create`: `manage-knowledge-context`（`action: create`, `name`, `statements: [{statement}, ...]`, `isGlobal: true` または `targetNodeId`）
+  - `update`: `manage-knowledge-context`（`action: update`, `contextId`）。`fields` に応じて `statements` / `name`（`new_name` の値）/ `isGlobal` か `targetNodeId` を渡す
+  - `pull`: 書き込まない。Knowledge 側の編集（`fields`）を台帳に取り込む（write-back で反映）
+  - `blocked`: 書き込まない。点検の error / unknown を直してから次回に回す
   - `conflict` / `recreate` / `orphan`: 書き込まない。報告で判断を仰ぐ。`orphan` の削除は承認後だけ
-- [ ] 書き込みの後にもう一度 `list` してスナップショットを取り直し、`plan --write-back` で台帳に `context_id` / `synced_statement` を記録する。このとき create / update した項目が `unchanged` になっていることを確かめる
+- [ ] 書き込みの後にもう一度 `list` して `knowledge_snapshot_after.json` に保存し、`plan --snapshot <after> --write-back` で台帳に `context_id` と同期済みの値（`synced_*`）を記録する。このとき create / update した項目が `unchanged` になっていることを確かめる
 - [ ] 台帳の変更は利用者のリポジトリ側の差分として残す（commit は利用者が判断する）
 
 ## モード3: 点検する（読取専用）
@@ -51,8 +54,10 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 進捗:
 - [ ] `python scripts/tableau_auth.py status`（リポジトリ直下）で cached session を確認する
-- [ ] `knowledge_ledger.py check --ledger <台帳> [--text-file <スキル.md> ...] --save-catalog <catalog.json> --out <check.json>` を実行する。台帳が無ければ、モード2の手順でスナップショットを取り、そこから台帳を作ってから回す
+- [ ] `knowledge_ledger.py check --ledger <台帳> [--text-file <スキル.md> ...] --save-catalog <catalog.json> --out <check.json>` を実行する。台帳が無ければ、モード2の手順でスナップショットを取り、`init` で台帳を作ってから回す
+- [ ] `--text-file` で渡した Markdown は、fenced code と二重バッククォートの例示を除き、実在する名前・glob に一致した引用と `` `X` in `Y` `` だけを参照として扱う（コマンドやパスの引用は無視される）
 - [ ] error（`missing_datasource` / `missing_field` / `unresolved`）は、改名先の候補を Metadata API の結果か `query-knowledge-context`（`intent: ground` のノード検索）で探し、修正案を付ける
+- [ ] unknown（`unknown_fields`）は、保存済みカタログにフィールドが無く判定できなかったもの。オンラインで再実行する
 - [ ] warning は bp-format の「点検結果の意味」に従って直し方を付ける。`ambiguous_field` は、どちらの列を指すつもりかを文脈から推定して示す
 - [ ] 二重定義を判定する: 各 item の `field_descriptions`（参照先の現在の説明）と statement を突き合わせ、次のどちらかに当たれば `duplicate_definition` として報告する
   - BP が説明の内容（それは何か）を言い換えている → BP から削る
@@ -61,13 +66,13 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 ## 出力と報告
 
-- `work/<yyyymmdd>_<tag>/` に `knowledge_snapshot.json` / `plan.json` / `check.json` / `catalog.json` を置く。
+- `work/<yyyymmdd>_<tag>/` に `knowledge_snapshot_before.json` / `knowledge_snapshot_after.json` / `plan.json` / `check.json` / `catalog.json` を置く。
 - 報告の本文は判断点だけを書く。順序は次のとおり:
-  1. error の参照切れと修正案
+  1. error の参照切れと修正案、`blocked` になった項目
   2. `conflict` / `recreate` / `orphan`
   3. 二重定義
   4. 書き込んだ件数（create / update）と、それぞれの contextId
-- 取り消しの手順: create したものは `delete`（承認必須）、update したものは `plan.json` の `previous` を statements に戻す `update`。
+- 取り消しの基準は `knowledge_snapshot_before.json`。create したものは `delete`（承認必須）、update したものは before の name / statements / scope に戻す `update`。
 
 ## 認証 / 依存
 
@@ -79,4 +84,4 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 | スクリプト | 役割 |
 |---|---|
-| `scripts/knowledge_ledger.py` | `refs`（参照名を抜いて `depends_on` を更新）/ `check`（参照切れ・曖昧・未引用の判定と、参照先の説明の収集）/ `plan`（台帳と Knowledge スナップショットの3方向比較による同期計画） |
+| `scripts/knowledge_ledger.py` | `init`（スナップショットから台帳を作る）/ `refs`（参照名を抜いて `depends_on` を更新）/ `check`（参照切れ・曖昧・未引用の判定と、参照先の説明の収集）/ `plan`（台帳と Knowledge スナップショットの、文面・名前・scope の3方向比較による同期計画。`--check` で error のある項目を `blocked` にする） |

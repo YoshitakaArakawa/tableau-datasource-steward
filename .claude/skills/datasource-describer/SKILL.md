@@ -66,7 +66,9 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
 - [ ] 既存 desc・grain の各文を placement-rules で振り分ける。`context` / `structure` / `drop` の文が混ざっていれば `misplaced`
 - [ ] 各 desc に verdict を付ける：`valid`（現データと整合）/ `stale`（乖離あり。乖離内容と修正草案を付す）/ `off_format`（grain フォーマット不適合。修正草案を付す）/ `misplaced`（使い方・集計の指示・コンテキストへの参照が混ざっている。「それは何か」だけ残した修正草案を付し、切り出した文は `bp_candidates[]` / `structure_findings[]` へ）/ `unverifiable`（現データからは確認できない。理由を付す）。複数当たるときは `stale` → `off_format` → `misplaced` の順に1つ選び、修正草案は全部を直す
 - [ ] inspector の `defaultAggregation` を見て、measure の既定の集計が実態に合わない（例: 単価・率が SUM）ものを `structure_findings[]` に `aggregation_mismatch` として出す。説明で補わない
-- [ ] `stale` / `off_format` / `misplaced` は修正草案を `descriptions[]`（grain は `datasource.description`）に載せ、原文を `previous_text` に残す。判断は orchestrator 報告でユーザー確認に回す（黙って上書きしない）
+- [ ] `stale` / `off_format` / `misplaced` は修正草案を `descriptions[]`（grain は `datasource.description`）に載せ、原文を `previous_text` に残す
+- [ ] `stale` / `off_format` は、判断を orchestrator 報告でユーザー確認に回す（黙って上書きしない）
+- [ ] `misplaced` は、バッチ実行の宣言の範囲で反映してよい。ただし切り出した文の行き先（`bp_candidates[]` の `name`）を audit の `moved_to` に記録する。行き先の BP が Knowledge に入ったことが確認できるまで、その修正草案を反映しない（使い方の文が説明からも Knowledge からも消えるのを防ぐ）
 - [ ] コスト管理は「サンプル値の使い方」に従う（行レベル取得を避ける）
 
 ## カバレッジ（取りこぼしを防ぐ）
@@ -106,7 +108,12 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
       "claim": "取りうる値は Consumer / Corporate / Home Office",
       "observed": "distinct に Small Business が追加されている",
       "previous_text": "顧客セグメント（Consumer / Corporate / Home Office）",
-      "revised_text": "顧客セグメント（Consumer / Corporate / Home Office / Small Business）" }
+      "revised_text": "顧客セグメント（Consumer / Corporate / Home Office / Small Business）" },
+    { "target": "datasource", "verdict": "misplaced",
+      "claim": "grain に既定の日付（使い方）が混ざっている",
+      "previous_text": "注文明細が 1 行。期間は注文日で見る。",
+      "revised_text": "注文明細行が 1 行。1 行 = 1 商品 × 1 注文。",
+      "moved_to": ["Usage: Default date for orders"] }
   ],
   "skipped": [
     { "field_caption": "ID_売付", "reason": "不透明な内部 ID。列名・型・サンプルから業務的意味を起こせない" }
@@ -128,7 +135,7 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
 
 `bp_candidates[]` の各要素は Business Preference 台帳の item と同じ形（`kind` / `name` / `statement` / `translation` / `rationale`）に揃え、出所を `origin` に残す。`statement` は英語で書き、データソース名・フィールド名は正確な名前をバッククォートで囲む。書式の正典は Knowledge 整備側の bp-format にある。
 
-`stale` の `revised_text` は `descriptions[]`（grain なら `datasource.description`）にも載せ、augmenter がそれを注入する。`audits[]` / `skipped[]` / `bp_candidates[]` / `structure_findings[]` と provenance フィールド（`source` / `conflict` / `variants` / `previous_text`）は **orchestrator がユーザー報告で「抽出 / 推論」「衝突」「stale の原文」を区別するための注記**。augmenter は自身が定義したキーしか読まないため、これらの注記は change-set にそのまま残してよい（キーの正典は augmenter の references/change-set-format.md）。
+`stale` / `off_format` / `misplaced` の `revised_text` は `descriptions[]`（grain なら `datasource.description`）にも載せ、augmenter がそれを注入する。`audits[]` / `skipped[]` / `bp_candidates[]` / `structure_findings[]` と provenance フィールド（`source` / `conflict` / `variants` / `previous_text` / `moved_to`）は **orchestrator がユーザー報告で「抽出 / 推論」「衝突」「stale の原文」を区別するための注記**。augmenter は自身が定義したキーしか読まないため、これらの注記は change-set にそのまま残してよい（キーの正典は augmenter の references/change-set-format.md）。
 
 ## description の品質規範
 
