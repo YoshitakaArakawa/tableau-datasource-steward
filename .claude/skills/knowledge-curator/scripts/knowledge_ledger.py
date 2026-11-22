@@ -188,11 +188,36 @@ def fetch_catalog(server, graphql) -> dict:
         after = conn["pageInfo"]["endCursor"]
 
 
+ALL_FIELDS_Q = ("query($first:Int!,$after:String){publishedDatasourcesConnection("
+                "first:$first,after:$after){nodes{luid fields{name description __typename}}"
+                "pageInfo{hasNextPage endCursor}}}")
+# 全 PDS のフィールドを一括で読むときの 1 ページ件数（フィールド込みなので小さめにする）
+ALL_FIELDS_PAGE_SIZE = 50
+
+
+def _field_rows(fields: list[dict]) -> list[dict]:
+    return [{"name": f["name"], "description": f.get("description"),
+             "type": f["__typename"]} for f in fields]
+
+
 def make_fetcher(server, graphql):
     def fetcher(luid: str) -> list[dict]:
         res = graphql(server, FIELDS_Q, {"l": luid})["publishedDatasources"]
-        return [{"name": f["name"], "description": f.get("description"),
-                 "type": f["__typename"]} for f in (res[0]["fields"] if res else [])]
+        return _field_rows(res[0]["fields"] if res else [])
+
+    def fetch_all() -> dict[str, list[dict]]:
+        """全 PDS のフィールドを一括で読む（luid → fields）。未修飾の名前をサイト全体で探すときだけ使う。"""
+        out, after = {}, None
+        while True:
+            conn = graphql(server, ALL_FIELDS_Q, {"first": ALL_FIELDS_PAGE_SIZE, "after": after})[
+                "publishedDatasourcesConnection"]
+            for n in conn["nodes"]:
+                out[n["luid"]] = _field_rows(n["fields"])
+            if not conn["pageInfo"]["hasNextPage"]:
+                return out
+            after = conn["pageInfo"]["endCursor"]
+
+    fetcher.fetch_all = fetch_all
     return fetcher
 
 
@@ -201,6 +226,24 @@ def ensure_fields(ds: dict, fetcher) -> list[dict] | None:
     if ds.get("fields") is None and fetcher:
         ds["fields"] = fetcher(ds["luid"])
     return ds.get("fields")
+
+
+def site_field_index(catalog: dict, fetcher) -> tuple[dict[str, list[str]], bool]:
+    """サイト全体の「フィールド名 → それを持つ PDS 名」と、全 PDS のフィールドが揃っているか。
+
+    オンラインでは未取得の PDS を一括で読んで埋める（埋めた fields は --save-catalog に残る）。
+    """
+    missing = [d for d in catalog["datasources"] if d.get("fields") is None]
+    if missing and fetcher is not None and hasattr(fetcher, "fetch_all"):
+        fetched = fetcher.fetch_all()
+        for d in missing:
+            d["fields"] = fetched.get(d["luid"], [])
+    index: dict[str, list[str]] = {}
+    for d in catalog["datasources"]:
+        for name in field_names(d.get("fields")):
+            index.setdefault(name, []).append(d["name"])
+    complete = all(d.get("fields") is not None for d in catalog["datasources"])
+    return index, complete
 
 
 # --- 照合 -----------------------------------------------------------------------
@@ -319,15 +362,26 @@ def check_text(text: str, catalog: dict, fetcher) -> dict:
                 f["siblings"] = sib
                 f["hint"] += "。同名の列があるので、どちらかを正確な名前で書く"
             findings.append(f)
-        elif not ds_in_scope:
-            findings.append({"status": "unresolved", "ref": r["name"],
-                             "hint": "データソースでもなく、同じ文にデータソースの参照も無い"})
-        elif len(known) < len(ds_in_scope):
-            findings.append({"status": "unknown_fields", "ref": r["name"],
-                             "hint": "カタログにフィールドが保存されていない。オンラインで再実行する"})
         else:
-            findings.append({"status": "missing_field", "ref": r["name"],
-                             "searched": sorted({d["name"] for d in ds_in_scope})})
+            # 同じ文のデータソースに無い（または文にデータソースが無い）未修飾の名前は、
+            # サイト全体で探す。どこかにあれば切れてはいないので warning、どこにも無ければ error。
+            # どの PDS か決まらないので、二重定義の材料（resolved）には入れない
+            index, complete = site_field_index(catalog, fetcher)
+            where = sorted(set(index.get(r["name"], [])))
+            scope_note = "同じ文のデータソースには無い。" if ds_in_scope else ""
+            if where:
+                findings.append({"status": "unqualified_field", "ref": r["name"], "datasources": where,
+                                 "hint": scope_note + "サイト内の上記 PDS にある。`field` in `datasource` で"
+                                         "修飾すると、その PDS での改名・削除も検出できる"})
+            elif not complete or len(known) < len(ds_in_scope):
+                findings.append({"status": "unknown_fields", "ref": r["name"],
+                                 "hint": "カタログにフィールドが保存されていない。オンラインで再実行する"})
+            else:
+                f = {"status": "missing_field", "ref": r["name"],
+                     "hint": "サイト内のどの PDS にも、この名前のフィールドもデータソースも無い"}
+                if any(d["name"].startswith(r["name"]) for d in catalog["datasources"]):
+                    f["hint"] += "。データソース名の接頭辞なら末尾に * を付ける"
+                findings.append(f)
 
     # 3) 地の文に出ている実在名（引用漏れ）
     for n in find_unquoted(text, all_ds_names):
@@ -355,7 +409,7 @@ def check_text(text: str, catalog: dict, fetcher) -> dict:
     return {"findings": findings, "field_descriptions": defs}
 
 
-SEVERITY = {"missing_datasource": "error", "missing_field": "error", "unresolved": "error",
+SEVERITY = {"missing_datasource": "error", "missing_field": "error",
             "unknown_fields": "unknown",
             "ambiguous_field": "warning", "partial_field": "warning", "unqualified_field": "warning",
             "duplicate_datasource_name": "warning", "placeholder_in_name": "warning",

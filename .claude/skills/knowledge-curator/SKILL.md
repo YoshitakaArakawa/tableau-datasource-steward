@@ -55,7 +55,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 進捗:
 - [ ] `python scripts/tableau_auth.py status`（リポジトリ直下）で cached session を確認する
 - [ ] `knowledge_ledger.py check --ledger <台帳> --save-catalog work/<yyyymmdd>_<tag>/catalog.json --out <check.json>` を実行する。台帳が無ければ、モード2の手順でスナップショットを取り、`init` で台帳を作ってから回す
-- [ ] error（`missing_datasource` / `missing_field` / `unresolved`）は、改名先の候補を Metadata API の結果か `query-knowledge-context`（`intent: ground` のノード検索）で探し、修正案を付ける
+- [ ] error（`missing_datasource` / `missing_field` / `placeholder_unmatched`）は、改名先の候補を Metadata API の結果か `query-knowledge-context`（`intent: ground` のノード検索）で探し、修正案を付ける
 - [ ] unknown（`unknown_fields`）は、保存済みカタログにフィールドが無く判定できなかったもの。オンラインで再実行する
 - [ ] warning は bp-format の「点検結果の意味」に従って直し方を付ける。`ambiguous_field` は、どちらの列を指すつもりかを文脈から推定して示す
 - [ ] 二重定義を判定する: 各 item の `field_descriptions`（参照先の現在の説明）と statement を突き合わせ、次のどちらかに当たれば `duplicate_definition` として報告する
