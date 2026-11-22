@@ -382,6 +382,17 @@ def verify_embed(server, published_luid: str) -> dict:
     return {"connections": len(conns), "embed_password_all": bool(conns) and all(embedded)}
 
 
+def publish_tdsx(server, item, tdsx_path: str, mode, creds):
+    """編集済み .tdsx を発行する唯一の経路（運び手）。
+
+    XML 編集・preflight・diff ゲート・事後検証はこの外側に置き、発行だけをここに
+    閉じ込める。公式 Tableau MCP に datasource の発行ツールが提供されたら、この関数だけを
+    差し替える（ゲートと検証は残す）。戻り値は発行された DatasourceItem（.id = LUID）。
+    """
+    return server.datasources.publish(item, tdsx_path, mode=mode,
+                                      connection_credentials=creds)
+
+
 # --- main ----------------------------------------------------------------------
 def rollback(spec_path: str, out_dir: str) -> None:
     """out-dir に保全した original.tdsx を元 PDS へ Overwrite 再 publish して巻き戻す。"""
@@ -396,9 +407,8 @@ def rollback(spec_path: str, out_dir: str) -> None:
         if src_item.description:  # grain も元の値で戻す（publish 時にしか設定できない）
             item.description = src_item.description
         creds = _oauth_credentials(spec)  # 巻き戻しも republish。embed を同様に保持する
-        published = server.datasources.publish(
-            item, str(orig), mode=TSC.Server.PublishMode.Overwrite,
-            connection_credentials=creds)
+        published = publish_tdsx(server, item, str(orig),
+                                 TSC.Server.PublishMode.Overwrite, creds)
         result = {"phase": "rollback", "published_luid": published.id,
                   "luid_preserved": published.id == spec["source_luid"]}
         if creds:
@@ -506,8 +516,7 @@ def main():
             item.description = ds_desc
         pub_mode = (TSC.Server.PublishMode.CreateNew if mode == "CreateNew"
                     else TSC.Server.PublishMode.Overwrite)
-        published = server.datasources.publish(item, str(edited_tdsx), mode=pub_mode,
-                                               connection_credentials=oauth_creds)
+        published = publish_tdsx(server, item, str(edited_tdsx), pub_mode, oauth_creds)
 
         # verify round-trip
         ver_tdsx = Path(server.datasources.download(

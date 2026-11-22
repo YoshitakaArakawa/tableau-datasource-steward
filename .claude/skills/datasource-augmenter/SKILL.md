@@ -29,6 +29,7 @@ Published Data Source (PDS) のメタデータを書き込む write エンジン
 - **CreateNew は calc 注入の既定**。別名 draft（例 `…__augmented`）を作り、元を壊さない。本番への反映（promote / calc 込み Overwrite）は**明示要求 + 下流影響の提示 + ユーザー承認**がそろったときのみ。
 - **grain は publish 時にしか設定できない**。Overwrite で spec に `datasource.description` が無ければ既存 grain を読んで引き継ぐ（消さない）。
 - **OAuth コネクタ（BigQuery / Google Drive 等）の republish は embed 済み資格情報を失う**。spec の `connection_credentials.oauth_username` を指定すると、publish 時に実行ユーザーの Saved Credential を embed し直し（生トークンは API に流れない）、publish 後に `embed_check` で維持を検証して `verified` の合否に含める。前提・制約は [references/change-set-format.md](references/change-set-format.md) を参照。
+- **発行の経路は `publish_tdsx()` 1 か所に閉じる**。XML 編集・ゲート・検証はその外側に置く。公式 Tableau MCP に datasource の発行ツールが提供されたら（20261122 時点では無い）、この関数だけを差し替え、ゲートと検証は残す。差し替え先が grain（`item.description`）と OAuth の資格情報（`creds`）を受け取れることを先に確かめる。
 - **巻き戻し**: republish 経路は `--rollback`（保全済み `original.tdsx` を Overwrite 再 publish）、source 列経路は `rollback` サブコマンド（記録済みの元値へ逆適用）、CreateNew draft は `cleanup_drafts.py`（ガード付き削除）。
 
 ## スコープ
