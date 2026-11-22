@@ -75,7 +75,7 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
 「未 desc 列ゼロ」を目標にするが、機械的に全列へ文を書くと同義反復（列名の言い換え）を量産し品質規範に反する。したがって**全列を「処理済み」にする**ことを保証し、文を書けない列は捨てずに残す。
 
 - gap の各列について、情報量のある desc を書けたものは `descriptions[]`、真に情報を足せない列（不透明 ID 等）は `skipped[]` に理由付きで残す
-- 完了条件（検算）：`len(新規 descriptions) + len(skipped) == inspector の gap 列数`（gap は inspector が擬似列と skip 候補を除いた実質未整備数）。inspector の skip 候補を採用した場合はそのまま、採用せず説明を書いた場合は `descriptions[]` 側に計上する。未処理列が無いことを確認する
+- 完了条件（検算）：`len(新規 descriptions) + len(skipped) == inspector の gap 列数`（gap は inspector が擬似列と skip 候補を除いた実質未整備数）。inspector の skip 候補を採用した場合はそのまま、採用せず説明を書いた場合は `descriptions[]` 側に計上する。草案の文がすべて `context` / `structure` / `drop` に振り分けられて説明が残らなかった列は、`skipped[]` に理由（行き先）付きで入れる。未処理列が無いことを確認する
 
 ## サンプル値の使い方
 
