@@ -1,0 +1,782 @@
+"""Business Preference 台帳の参照抽出・参照切れ点検・Knowledge との同期計画。
+
+Knowledge への書き込みは行わない（書き込みは Tableau MCP の manage-knowledge-context）。
+本スクリプトは決定的に判定できる部分だけを担う。BP は global スコープだけを扱う
+（現行の Knowledge は global の BP しか設定できない）。
+
+subcommands:
+    init   Knowledge のスナップショットから台帳を作る（台帳が無いとき）
+    refs   台帳の statements からバッククォートの名前を抜き、depends_on を更新する（オフライン）
+    check  参照名を実在する PDS 名・フィールド名と照合する（参照切れ・曖昧・未引用）
+    plan   台帳と Knowledge のスナップショットを3方向比較し、create / update / pull を計画する
+
+usage:
+    python knowledge_ledger.py init  --snapshot knowledge.json [--snapshot more.json] --ledger bp.json --graph-id <id>
+    python knowledge_ledger.py refs  --ledger bp.json [--write-back]
+    python knowledge_ledger.py check --ledger bp.json --out check.json
+                                     [--catalog catalog.json | --save-catalog catalog.json]
+    python knowledge_ledger.py plan  --ledger bp.json --snapshot knowledge.json [--snapshot more.json]
+                                     --check check.json --out plan.json [--write-back]
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# Windows コンソール (cp932) の文字化け対策
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
+# セットアップ時に置換されるプレースホルダ（{{NAME}}）。名前の照合対象から外す
+PLACEHOLDER = re.compile(r"\{\{[^}]*\}\}")
+BACKTICK = re.compile(r"`([^`\n]+)`")
+# `field` in `datasource` の対（in の前後は空白のみ許す）
+FIELD_IN_DS = re.compile(r"`([^`\n]+)`\s+in\s+`([^`\n]+)`")
+# 名前の中の <table> のような可変部。glob の * に書き換えるべきもの
+ANGLE_PLACEHOLDER = re.compile(r"<[^<>]+>")
+# 二重引用符で囲んだ語は「問いの言葉」（C2 の解釈対象）で、名前の参照ではない
+DOUBLE_QUOTED = re.compile(r'"[^"\n]*"|“[^”\n]*”')
+# 未引用検出で拾う名前の最短長。2文字以下は地の文と衝突しやすい
+MIN_UNQUOTED_LEN = 3
+# Metadata API の 1 ページ件数（connection の first 上限に収まる値）
+PAGE_SIZE = 100
+# 名前の境界。ASCII の語の途中（Revenues の Revenue）だけを除き、日本語の地の文に
+# 埋まった名前（売上はRevenueを使う）は拾う
+WORD_EDGE_L = r"(?<![A-Za-z0-9_])"
+WORD_EDGE_R = r"(?![A-Za-z0-9_])"
+# plan が受け入れる点検結果の古さの既定（カタログを読んでからの時間）
+DEFAULT_MAX_CHECK_AGE_HOURS = 24
+# name の kind 接頭辞（"Term: ..."）
+KIND_PREFIX = re.compile(r"^(Usage|Term|Method|Cross-source metric):\s")
+
+
+def is_glob(name: str) -> bool:
+    return "*" in name or "?" in name
+
+
+# --- 台帳 ------------------------------------------------------------------------
+# 台帳の item は利用者が書いた形のまま保存する。読み替えは下のアクセサで行い、
+# 読み替えた値を item に書き戻さない（title/text 形式が二重保存されないように）。
+def item_name(it: dict) -> str:
+    return it.get("name") or it.get("title") or ""
+
+
+def item_statements(it: dict) -> list[str]:
+    if isinstance(it.get("statements"), list):
+        return [str(s) for s in it["statements"]]
+    single = it.get("statement") or it.get("text")
+    return [single] if single else []
+
+
+def set_statements(it: dict, statements: list[str]) -> None:
+    """元の形を保って書き戻す。1 本なら元のキー、複数なら statements に移す。"""
+    if "statements" in it or len(statements) != 1:
+        it.pop("statement", None)
+        it.pop("text", None)
+        it["statements"] = statements
+    elif "text" in it and "statement" not in it:
+        it["text"] = statements[0]
+    else:
+        it["statement"] = statements[0]
+
+
+def load_ledger(path: str) -> dict:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    names = []
+    for it in data.get("items", []):
+        if not item_name(it) or not item_statements(it):
+            raise SystemExit(f"ledger item lacks name/statements: {json.dumps(it, ensure_ascii=False)[:200]}")
+        if it.get("scope", "global") != "global":
+            raise SystemExit(f"global 以外の scope は扱わない: {item_name(it)}")
+        names.append(item_name(it))
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise SystemExit(f"duplicate item names in ledger (name is the sync key): {dup}")
+    return data
+
+
+def save_json(path: str, data: dict) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+# --- 参照の抽出 ------------------------------------------------------------------
+def extract_refs(text: str) -> list[dict]:
+    """バッククォートの名前を抜く。`X` in `Y` は field X in datasource Y。
+
+    {{NAME}} を含む名前はセットアップ時に置換される前提で照合しない（文字列は消さず、
+    その名前だけを外す。消すと前後のバッククォートが組み変わって誤検出になる）。
+    """
+    refs, consumed = [], set()
+    for m in FIELD_IN_DS.finditer(text):
+        consumed.add(m.start(1))
+        consumed.add(m.start(2))
+        field, ds = m.group(1), m.group(2)
+        if PLACEHOLDER.search(ds):
+            continue  # データソースが決まらないのでフィールドも照合できない
+        if PLACEHOLDER.search(field):
+            refs.append({"kind": "name", "name": ds})
+            continue
+        refs.append({"kind": "field", "field": field, "datasource": ds})
+    for m in BACKTICK.finditer(text):
+        if m.start(1) in consumed or PLACEHOLDER.search(m.group(1)):
+            continue
+        refs.append({"kind": "name", "name": m.group(1)})  # datasource か未修飾の field
+    return refs
+
+
+def ref_names(refs: list[dict]) -> list[str]:
+    out = []
+    for r in refs:
+        out.append(f"{r['field']} in {r['datasource']}" if r["kind"] == "field" else r["name"])
+    return sorted(set(out))
+
+
+def cmd_refs(args) -> None:
+    ledger = load_ledger(args.ledger)
+    rows = []
+    for it in ledger["items"]:
+        names = ref_names(extract_refs("\n".join(item_statements(it))))
+        rows.append({"name": item_name(it), "depends_on": names})
+        if args.write_back:
+            it["depends_on"] = names
+    if args.write_back:
+        save_json(args.ledger, ledger)
+    print(json.dumps(rows, indent=2, ensure_ascii=False))
+
+
+# --- カタログ（実在する名前） ---------------------------------------------------------
+def _repo_modules():
+    cur = Path(__file__).resolve()
+    for _ in range(8):
+        cur = cur.parent
+        if (cur / "scripts" / "tableau_auth.py").exists():
+            sys.path.insert(0, str(cur / "scripts"))
+            break
+    else:
+        raise RuntimeError("repo-root scripts/ (with tableau_auth.py) not found")
+    from tableau_auth import signed_in_server  # noqa: E402  (OAuth)
+    from metadata_api import graphql  # noqa: E402
+    return signed_in_server, graphql
+
+
+LIST_Q = ("query($first:Int!,$after:String){publishedDatasourcesConnection("
+          "first:$first,after:$after){nodes{name luid projectName}"
+          "pageInfo{hasNextPage endCursor}}}")
+FIELDS_Q = ("query($l:String!){publishedDatasources(filter:{luid:$l}){"
+            "fields{name description __typename}}}")
+
+
+def fetch_catalog(server, graphql) -> dict:
+    """サイトの全 PDS 名を読む。フィールドは参照された PDS だけ後で読む（fields=None は未取得）。"""
+    out, after = [], None
+    while True:
+        conn = graphql(server, LIST_Q, {"first": PAGE_SIZE, "after": after})[
+            "publishedDatasourcesConnection"]
+        out.extend({"name": n["name"], "luid": n["luid"], "project": n.get("projectName"),
+                    "fields": None} for n in conn["nodes"])
+        if not conn["pageInfo"]["hasNextPage"]:
+            return {"datasources": out, "fetched_at": now_utc()}
+        after = conn["pageInfo"]["endCursor"]
+
+
+ALL_FIELDS_Q = ("query($first:Int!,$after:String){publishedDatasourcesConnection("
+                "first:$first,after:$after){nodes{luid fields{name description __typename}}"
+                "pageInfo{hasNextPage endCursor}}}")
+# 全 PDS のフィールドを一括で読むときの 1 ページ件数（フィールド込みなので小さめにする）
+ALL_FIELDS_PAGE_SIZE = 50
+
+
+def _field_rows(fields: list[dict]) -> list[dict]:
+    return [{"name": f["name"], "description": f.get("description"),
+             "type": f["__typename"]} for f in fields]
+
+
+def make_fetcher(server, graphql):
+    def fetcher(luid: str) -> list[dict]:
+        res = graphql(server, FIELDS_Q, {"l": luid})["publishedDatasources"]
+        return _field_rows(res[0]["fields"] if res else [])
+
+    def fetch_all() -> dict[str, list[dict]]:
+        """全 PDS のフィールドを一括で読む（luid → fields）。未修飾の名前をサイト全体で探すときだけ使う。"""
+        out, after = {}, None
+        while True:
+            conn = graphql(server, ALL_FIELDS_Q, {"first": ALL_FIELDS_PAGE_SIZE, "after": after})[
+                "publishedDatasourcesConnection"]
+            for n in conn["nodes"]:
+                out[n["luid"]] = _field_rows(n["fields"])
+            if not conn["pageInfo"]["hasNextPage"]:
+                return out
+            after = conn["pageInfo"]["endCursor"]
+
+    fetcher.fetch_all = fetch_all
+    return fetcher
+
+
+def ensure_fields(ds: dict, fetcher) -> list[dict] | None:
+    """必要になった PDS だけフィールドを読む。オフラインで未取得なら None（判定不能）。"""
+    if ds.get("fields") is None and fetcher:
+        ds["fields"] = fetcher(ds["luid"])
+    return ds.get("fields")
+
+
+def site_field_index(catalog: dict, fetcher) -> tuple[dict[str, list[str]], bool]:
+    """サイト全体の「フィールド名 → それを持つ PDS 名」と、全 PDS のフィールドが揃っているか。
+
+    オンラインでは未取得の PDS を一括で読んで埋める（埋めた fields は --save-catalog に残る）。
+    """
+    missing = [d for d in catalog["datasources"] if d.get("fields") is None]
+    if missing and fetcher is not None and hasattr(fetcher, "fetch_all"):
+        fetched = fetcher.fetch_all()
+        for d in missing:
+            d["fields"] = fetched.get(d["luid"], [])
+    index: dict[str, list[str]] = {}
+    for d in catalog["datasources"]:
+        for name in field_names(d.get("fields")):
+            index.setdefault(name, []).append(d["name"])
+    complete = all(d.get("fields") is not None for d in catalog["datasources"])
+    return index, complete
+
+
+# --- 照合 -----------------------------------------------------------------------
+def match_datasources(catalog: dict, name: str) -> list[dict]:
+    if is_glob(name):
+        return [d for d in catalog["datasources"] if fnmatch.fnmatchcase(d["name"], name)]
+    return [d for d in catalog["datasources"] if d["name"] == name]
+
+
+def field_names(fields: list[dict] | None) -> set[str]:
+    return {f["name"] for f in fields or []}
+
+
+def siblings(name: str, names: set[str]) -> list[str]:
+    """`Shipped Date` に対する `Shipped Date (shipment_lines.csv)` のような同名列。"""
+    return sorted(n for n in names if n != name and n.startswith(name + " ("))
+
+
+def strip_quoted(text: str) -> str:
+    return DOUBLE_QUOTED.sub(" ", BACKTICK.sub(" ", PLACEHOLDER.sub(" ", text)))
+
+
+def find_unquoted(text: str, names: set[str], one_word_needs_in: bool = False) -> list[str]:
+    """引用されていない地の文に、実在する名前がそのまま出ていないか。
+
+    one_word_needs_in: 1語の名前（Customer・Date 等）は英語の地の文と区別できないので、
+    参照の形（`<名前> in <何か>`）か、日本語等に接しているときだけ拾う。
+    """
+    plain = strip_quoted(text)
+    hits = []
+    for n in sorted(names, key=len, reverse=True):
+        if len(n) < MIN_UNQUOTED_LEN:
+            continue
+        name = re.escape(n)
+        pattern = WORD_EDGE_L + name + WORD_EDGE_R
+        if one_word_needs_in and not re.search(r"\s", n):
+            # 英語の地の文と区別できる形だけ拾う: `<名前> in <何か>`、または日本語等の
+            # 非 ASCII 文字に接している（空白で区切らない言語に埋まった名前）
+            pattern = (WORD_EDGE_L + name + r"\s+in\s+\S"
+                       + "|" + r"(?<=[^\x00-\x7F])" + name + WORD_EDGE_R
+                       + "|" + WORD_EDGE_L + name + r"(?=[^\x00-\x7F])")
+        if re.search(pattern, plain):
+            hits.append(n)
+            plain = plain.replace(n, " ")  # 長い名前に含まれる短い名前を二重計上しない
+    return hits
+
+
+def check_text(text: str, catalog: dict, fetcher) -> dict:
+    """台帳 1 項目分の照合。"""
+    refs = extract_refs(text)
+    findings = []
+    all_ds_names = {d["name"] for d in catalog["datasources"]}
+    ds_in_scope: list[dict] = []
+    pending_fields = []
+    resolved: list[tuple[str, dict]] = []  # (field 名, PDS) の解決済みの対
+
+    # 1) データソース参照を先に解決する（未修飾の field の候補範囲になる）
+    for r in refs:
+        ds_name = r["datasource"] if r["kind"] == "field" else r["name"]
+        if ANGLE_PLACEHOLDER.search(ds_name):
+            glob = ANGLE_PLACEHOLDER.sub("*", ds_name)
+            n = len(match_datasources(catalog, glob))
+            # 一致が 0 件なら、glob に直しても参照切れ。ゲートで止める
+            findings.append({"status": "placeholder_in_name" if n else "placeholder_unmatched",
+                             "ref": ds_name, "hint": f"可変部は * の glob で書く（`{glob}`）",
+                             "glob_matches": n})
+            continue
+        matched = match_datasources(catalog, ds_name)
+        if r["kind"] == "name" and not matched and not is_glob(ds_name):
+            pending_fields.append(r)  # データソースでなければ未修飾 field の候補
+            continue
+        if not matched:
+            findings.append({"status": "missing_datasource", "ref": ds_name,
+                             **({"hint": "glob に一致するデータソースが無い"} if is_glob(ds_name) else {})})
+            continue
+        if not is_glob(ds_name) and len(matched) > 1:
+            findings.append({"status": "duplicate_datasource_name", "ref": ds_name,
+                             "projects": sorted(str(d.get("project")) for d in matched)})
+        ds_in_scope.extend(matched)
+        if r["kind"] != "field":
+            findings.append({"status": "ok", "ref": ds_name,
+                             "datasources": [d["name"] for d in matched]})
+            continue
+        ref = f"{r['field']} in {ds_name}"
+        known = [d for d in matched if ensure_fields(d, fetcher) is not None]
+        hits = [d for d in known if r["field"] in field_names(d["fields"])]
+        if not hits:
+            if len(known) < len(matched):
+                findings.append({"status": "unknown_fields", "ref": ref,
+                                 "hint": "カタログにフィールドが保存されていない。オンラインで再実行する"})
+            else:
+                findings.append({"status": "missing_field", "ref": ref})
+            continue
+        resolved.extend((r["field"], d) for d in hits)
+        sib = sorted({s for d in hits for s in siblings(r["field"], field_names(d["fields"]))})
+        if sib:
+            findings.append({"status": "ambiguous_field", "ref": ref, "siblings": sib})
+        elif is_glob(ds_name) and len(hits) < len(known):
+            findings.append({"status": "partial_field", "ref": ref,
+                             "datasources": [d["name"] for d in hits],
+                             "missing_in": sorted(d["name"] for d in known if d not in hits)})
+        else:
+            findings.append({"status": "ok", "ref": ref, "datasources": [d["name"] for d in hits]})
+
+    # 2) データソースでなかった単独の名前 = 未修飾の field
+    for r in pending_fields:
+        known = [d for d in ds_in_scope if ensure_fields(d, fetcher) is not None]
+        hits = [d for d in known if r["name"] in field_names(d["fields"])]
+        if hits:
+            resolved.extend((r["name"], d) for d in hits)
+            f = {"status": "unqualified_field", "ref": r["name"],
+                 "datasources": sorted({d["name"] for d in hits}),
+                 "hint": "`field` in `datasource` の形で修飾する"}
+            sib = sorted({s for d in hits for s in siblings(r["name"], field_names(d["fields"]))})
+            if sib:
+                f["siblings"] = sib
+                f["hint"] += "。同名の列があるので、どちらかを正確な名前で書く"
+            findings.append(f)
+        else:
+            # 同じ文のデータソースに無い（または文にデータソースが無い）未修飾の名前は、
+            # サイト全体で探す。どこかにあれば切れてはいないので warning、どこにも無ければ error。
+            # どの PDS か決まらないので、二重定義の材料（resolved）には入れない
+            index, complete = site_field_index(catalog, fetcher)
+            where = sorted(set(index.get(r["name"], [])))
+            scope_note = "同じ文のデータソースには無い。" if ds_in_scope else ""
+            if where:
+                findings.append({"status": "unqualified_field", "ref": r["name"], "datasources": where,
+                                 "hint": scope_note + "サイト内の上記 PDS にある。`field` in `datasource` で"
+                                         "修飾すると、その PDS での改名・削除も検出できる"})
+            elif not complete or len(known) < len(ds_in_scope):
+                findings.append({"status": "unknown_fields", "ref": r["name"],
+                                 "hint": "カタログにフィールドが保存されていない。オンラインで再実行する"})
+            else:
+                f = {"status": "missing_field", "ref": r["name"],
+                     "hint": "サイト内のどの PDS にも、この名前のフィールドもデータソースも無い"}
+                if any(d["name"].startswith(r["name"]) for d in catalog["datasources"]):
+                    f["hint"] += "。データソース名の接頭辞なら末尾に * を付ける"
+                findings.append(f)
+
+    # 3) 地の文に出ている実在名（引用漏れ）
+    for n in find_unquoted(text, all_ds_names):
+        findings.append({"status": "unquoted_datasource", "ref": n})
+        ds_in_scope.extend(match_datasources(catalog, n))
+    uniq = list({id(d): d for d in ds_in_scope}.values())
+    scope_fields: set[str] = set()
+    for d in uniq:
+        scope_fields |= field_names(ensure_fields(d, fetcher))
+    for n in find_unquoted(text, scope_fields, one_word_needs_in=True):
+        findings.append({"status": "unquoted_field", "ref": n})
+        resolved.extend((n, d) for d in uniq if n in field_names(d.get("fields")))
+
+    # 二重定義の判定材料: 参照先フィールドの現在の説明（判定は Skill 側で行う）
+    defs, seen = [], set()
+    for fname, d in resolved:
+        key = (fname, d["luid"])
+        if key in seen:
+            continue
+        seen.add(key)
+        for fld in d.get("fields") or []:
+            if fld["name"] == fname and fld.get("description"):
+                defs.append({"field": fname, "datasource": d["name"],
+                             "description": fld["description"]})
+    return {"findings": findings, "field_descriptions": defs}
+
+
+SEVERITY = {"missing_datasource": "error", "missing_field": "error",
+            "unknown_fields": "unknown",
+            "ambiguous_field": "warning", "partial_field": "warning", "unqualified_field": "warning",
+            "duplicate_datasource_name": "warning", "placeholder_in_name": "warning",
+            "placeholder_unmatched": "error",
+            "unquoted_datasource": "warning", "unquoted_field": "warning", "ok": "ok"}
+
+
+def statements_hash(statements: list[str]) -> str:
+    """check と plan が同じ版の文面を見ているかの照合用。空白の揺れは無視する。"""
+    norm = "\n".join(re.sub(r"\s+", " ", x).strip() for x in statements)
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def cmd_check(args) -> None:
+    if args.catalog:
+        catalog = json.loads(Path(args.catalog).read_text(encoding="utf-8"))
+        run_check(args, catalog, None)
+        return
+    signed_in_server, graphql = _repo_modules()
+    with signed_in_server() as server:
+        run_check(args, fetch_catalog(server, graphql), make_fetcher(server, graphql))
+
+
+def now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def run_check(args, catalog: dict, fetcher) -> None:
+    items = [{"source": "ledger", "name": item_name(it),
+              "text": "\n".join(item_statements(it)),
+              "statements_hash": statements_hash(item_statements(it))}
+             for it in load_ledger(args.ledger)["items"]]
+    results, totals = [], {"error": 0, "unknown": 0, "warning": 0, "ok": 0}
+    for it in items:
+        r = check_text(it["text"], catalog, fetcher)
+        for f in r["findings"]:
+            f["severity"] = SEVERITY[f["status"]]
+            totals[f["severity"]] += 1
+        results.append({"source": it["source"], "name": it["name"],
+                        "statements_hash": it["statements_hash"], **r})
+
+    # 照合に使ったカタログを読んだ時刻。plan の鮮度ゲートが使う。保存済みカタログに
+    # 時刻が無ければ null（plan はその点検結果で書き込まない）
+    save_json(args.out, {"checked_at": now_utc(), "catalog_fetched_at": catalog.get("fetched_at"),
+                         "catalog_mode": "offline" if fetcher is None else "online",
+                         "totals": totals, "items": results})
+    if args.save_catalog:
+        # fields=null はこの回に読まなかった PDS。オフライン再実行では unknown_fields になる
+        save_json(args.save_catalog, catalog)
+    print("RESULT_JSON:", json.dumps({"items": len(results), **totals}, ensure_ascii=False))
+
+
+# --- スナップショット -------------------------------------------------------------------
+def _statement_rows(raw, path: str) -> list:
+    """inspect-knowledge-context list の出力から statement の行を取り出す。
+
+    実出力（20261122 確認）: {"action": "list", "statements": [行...], "resultInfo": {...}}。
+    1 行 = statement 1 件で、contextId / contextName / statementId / text / scope を持つ。
+    """
+    if isinstance(raw, dict):
+        if (raw.get("resultInfo") or {}).get("truncated"):
+            # 欠けたスナップショットで計画すると、見えない context を create して重複させる
+            raise SystemExit(f"snapshot is truncated: {path}。limit を上げて全件読み直す")
+        raw = raw.get("statements")
+    if not isinstance(raw, list):
+        raise SystemExit(f"snapshot: expected inspect-knowledge-context list output: {path}")
+    return raw
+
+
+def load_snapshots(paths: list[str]) -> list[dict]:
+    """スナップショット（複数可）を context 単位の正規形に集約する。
+
+    正規形: {context_id, name, statements: [str], invalid}
+    同じ context の statement は出現順に並べる。同じ statementId は 1 件として扱う。
+    """
+    out: dict[str, dict] = {}
+    seen: set[str] = set()
+    for path in paths:
+        for row in _statement_rows(json.loads(Path(path).read_text(encoding="utf-8")), path):
+            cid = row.get("contextId")
+            if not cid:
+                raise SystemExit(f"snapshot row lacks contextId: {json.dumps(row, ensure_ascii=False)[:200]}")
+            if row.get("scope") != "global":
+                raise SystemExit(f"snapshot context {cid}: scope={row.get('scope')!r}。"
+                                 "global 以外の BP は扱わない（出力の形が変わった可能性）")
+            c = out.setdefault(cid, {"context_id": cid, "name": row.get("contextName"),
+                                     "statements": [], "invalid": False})
+            sid = row.get("statementId")
+            if sid and sid in seen:
+                continue
+            if sid:
+                seen.add(sid)
+            if row.get("text"):
+                c["statements"].append(row["text"])
+    for c in out.values():
+        # 名前か文面が空の context は同期の対象にしない（全体は止めない）
+        c["invalid"] = not c["name"] or not c["statements"]
+    return list(out.values())
+
+
+def cmd_init(args) -> None:
+    if Path(args.ledger).exists():
+        raise SystemExit(f"ledger already exists: {args.ledger}（上書きしない）")
+    items, skipped = [], []
+    for c in load_snapshots(args.snapshot):
+        if c["invalid"]:
+            skipped.append(c["context_id"])
+            continue
+        m = KIND_PREFIX.match(c["name"] or "")
+        it = {"kind": m.group(1) if m else None, "name": c["name"],
+              "statements": c["statements"], "translation": None, "rationale": None,
+              "context_id": c["context_id"], "synced_statements": c["statements"],
+              "synced_name": c["name"]}
+        items.append(it)
+    save_json(args.ledger, {"graph_id": args.graph_id, "items": items})
+    print("RESULT_JSON:", json.dumps({"items": len(items), "skipped_invalid": skipped},
+                                     ensure_ascii=False))
+
+
+# --- 同期計画 ---------------------------------------------------------------------
+def _norm_list(xs) -> list[str]:
+    return [re.sub(r"\s+", " ", str(x)).strip() for x in xs]
+
+
+def three_way(mine, theirs, synced, norm=lambda v: v) -> str:
+    """same / push（台帳側が変わった）/ pull（Knowledge 側が変わった）/ conflict。"""
+    if norm(mine) == norm(theirs):
+        return "same"
+    if synced is not None and norm(synced) == norm(theirs):
+        return "push"
+    if synced is not None and norm(synced) == norm(mine):
+        return "pull"
+    return "conflict"
+
+
+def _synced_statements(it: dict):
+    if it.get("synced_statements") is not None:
+        return it["synced_statements"]
+    if it.get("synced_statement") is not None:  # 旧形式
+        return [it["synced_statement"]]
+    return None
+
+
+def stale_reason(data: dict, max_age_hours: float) -> str | None:
+    """点検に使ったカタログが古ければ理由を返す（全項目を止める）。
+
+    点検の後にデータソースやフィールドが改名・削除されても、古い点検結果では検出できない。
+    """
+    fetched = data.get("catalog_fetched_at")
+    if not fetched:
+        return "点検結果にカタログの取得時刻が無い。オンラインで check をやり直す"
+    try:
+        at = datetime.fromisoformat(fetched)
+    except ValueError:
+        return f"カタログの取得時刻が読めない（{fetched}）。オンラインで check をやり直す"
+    if at.tzinfo is None:
+        return f"カタログの取得時刻にタイムゾーンが無い（{fetched}）。オンラインで check をやり直す"
+    age = datetime.now(timezone.utc) - at
+    if age > timedelta(hours=max_age_hours):
+        return (f"点検に使ったカタログが古い（{fetched}、{age.total_seconds() / 3600:.1f} 時間前。"
+                f"上限 {max_age_hours:g} 時間）。オンラインで check をやり直す")
+    return None
+
+
+def gate_reasons(check_path: str, ledger: dict,
+                 max_age_hours: float = DEFAULT_MAX_CHECK_AGE_HOURS) -> dict[str, list[str]]:
+    """create / update してはいけない台帳項目と理由（機械ゲート）。
+
+    次のどれかに当たる項目を止める:
+    - 点検に使ったカタログが古い、または取得時刻が分からない（全項目）
+    - 点検で error / unknown が出た
+    - 点検結果に無い（点検の後に足した・改名した）
+    - 点検した文面と、いまの台帳の文面が違う（点検の後に直した）
+    """
+    data = json.loads(Path(check_path).read_text(encoding="utf-8"))
+    stale = stale_reason(data, max_age_hours)
+    if stale:
+        return {item_name(it): [stale] for it in ledger["items"]}
+    checked = {it["name"]: it for it in data.get("items", []) if it.get("source") == "ledger"}
+    out = {}
+    for it in ledger["items"]:
+        name = item_name(it)
+        c = checked.get(name)
+        if c is None:
+            out[name] = ["点検結果に無い。台帳に対して check をやり直す"]
+            continue
+        if c.get("statements_hash") != statements_hash(item_statements(it)):
+            out[name] = ["点検の後に文面が変わった。check をやり直す"]
+            continue
+        bad = [f"{f['status']}: {f['ref']}" for f in c["findings"]
+               if f["severity"] in ("error", "unknown")]
+        if bad:
+            out[name] = bad
+    return out
+
+
+def cmd_plan(args) -> None:
+    ledger = load_ledger(args.ledger)
+    if not ledger.get("graph_id"):
+        # graphId を省くと MCP は primary グラフを読み書きする。台帳と別のグラフに書かないよう止める
+        raise SystemExit("ledger has no graph_id。inspect-knowledge-context status で対象グラフの id を確かめて台帳に書く")
+    snap = load_snapshots(args.snapshot)
+    blocked = gate_reasons(args.check, ledger, args.max_check_age_hours)
+    by_id = {c["context_id"]: c for c in snap}
+    by_name: dict[str, list[dict]] = {}
+    for c in snap:
+        if not c["invalid"]:
+            by_name.setdefault(c["name"], []).append(c)
+
+    actions, linked = [], set()
+    # context_id で紐づいている context は、名前による紐づけの候補から外す（別項目に奪わせない）
+    claimed = {it["context_id"] for it in ledger["items"]
+               if it.get("context_id") in by_id}
+    names_in_ledger = {item_name(it) for it in ledger["items"]}
+    # Knowledge は同じ name の context を作れてしまう（20261122 実測）。name は照合キーなので、
+    # create / 改名で既存 context と同じ名前になる書き込みは止める
+    knowledge_names: dict[str, set[str]] = {}
+    for c in snap:
+        if c["name"]:
+            knowledge_names.setdefault(c["name"], set()).add(c["context_id"])
+
+    def name_taken(name: str, own_id: str | None) -> list[str]:
+        return sorted(knowledge_names.get(name, set()) - {own_id})
+
+    def push_write(action: dict, name: str) -> dict:
+        if name in blocked:
+            return {**action, "action": "blocked", "blocked_action": action["action"],
+                    "reason": "機械ゲートで止めた。理由を直してから同期する",
+                    "findings": blocked[name]}
+        return action
+
+    for it in ledger["items"]:
+        name = item_name(it)
+        k = by_id.get(it.get("context_id")) if it.get("context_id") else None
+        if it.get("context_id") and not k:
+            actions.append({"action": "recreate", "name": name, "context_id": it["context_id"],
+                            "reason": "台帳の contextId が Knowledge に無い（外部で削除された可能性）。作り直すかは確認する"})
+            continue
+        if not k:
+            cands = [c for c in by_name.get(name, [])
+                     if c["context_id"] not in claimed and c["context_id"] not in linked]
+            if len(cands) > 1:
+                ids = [c["context_id"] for c in cands]
+                linked.update(ids)
+                actions.append({"action": "conflict", "name": name, "context_ids": ids,
+                                "reason": "同名の context が Knowledge に複数ある"})
+                continue
+            if not cands:
+                taken = name_taken(name, None)
+                if taken:
+                    actions.append({"action": "conflict", "name": name, "context_ids": taken,
+                                    "reason": "同じ name の context が Knowledge にあり、別の台帳項目に紐づいている。"
+                                              "create すると name が重複する"})
+                    continue
+                actions.append(push_write({"action": "create", "name": name,
+                                           "statements": item_statements(it)}, name))
+                continue
+            k = cands[0]
+        linked.add(k["context_id"])
+        if k["invalid"]:
+            actions.append({"action": "invalid", "name": name, "context_id": k["context_id"],
+                            "reason": "Knowledge 側の context の名前か文面が空。Knowledge で確かめる"})
+            continue
+
+        dims = {
+            "statements": three_way(item_statements(it), k["statements"], _synced_statements(it),
+                                    _norm_list),
+            "name": three_way(name, k["name"], it.get("synced_name")),
+        }
+        if dims["name"] == "pull" and k["name"] in names_in_ledger:
+            dims["name"] = "conflict"  # 取り込むと台帳の別項目と同じ名前になる
+        if dims["name"] == "push" and name_taken(name, k["context_id"]):
+            dims["name"] = "conflict"  # 改名すると Knowledge の別 context と同じ名前になる
+        base = {"name": name, "context_id": k["context_id"]}
+        conflicts = [d for d, v in dims.items() if v == "conflict"]
+        if conflicts:
+            actions.append({**base, "action": "conflict", "dimensions": conflicts,
+                            "reason": "台帳と Knowledge の両方が前回同期から変わった（または未同期で値が違う）",
+                            "ledger": {"name": name, "statements": item_statements(it)},
+                            "knowledge": {"name": k["name"], "statements": k["statements"]}})
+            continue
+        push = {d for d, v in dims.items() if v == "push"}
+        pull = {d for d, v in dims.items() if v == "pull"}
+        if push:
+            upd = {**base, "action": "update", "fields": sorted(push),
+                   "previous": {"name": k["name"], "statements": k["statements"]}}
+            if "statements" in push:
+                upd["statements"] = item_statements(it)
+            if "name" in push:
+                upd["new_name"] = name
+            actions.append(push_write(upd, name))
+        if pull:
+            actions.append({**base, "action": "pull", "fields": sorted(pull),
+                            "knowledge": {"name": k["name"], "statements": k["statements"]}})
+        if not push and not pull:
+            actions.append({**base, "action": "unchanged"})
+        if args.write_back:
+            it["context_id"] = k["context_id"]  # 名前で紐づけた項目もここで固定する
+            # Knowledge が正本。pull は台帳に取り込み、一致した次元は同期済みとして記録する
+            if "statements" in pull:
+                set_statements(it, k["statements"])
+                it["translation_stale"] = True
+            if "name" in pull:
+                it["name"] = k["name"]
+                it.pop("title", None)
+            if "statements" not in push:
+                it["synced_statements"] = k["statements"]
+                it.pop("synced_statement", None)
+            if "name" not in push:
+                it["synced_name"] = k["name"]
+
+    for c in snap:
+        if c["context_id"] not in linked and c["invalid"]:
+            actions.append({"action": "invalid", "name": c["name"], "context_id": c["context_id"],
+                            "reason": "Knowledge 側の context の名前か文面が空。同期の対象にしない"})
+        elif c["context_id"] not in linked:
+            actions.append({"action": "orphan", "name": c["name"], "context_id": c["context_id"],
+                            "statements": c["statements"],
+                            "reason": "台帳に無い。台帳に取り込むか、削除（要承認）するかを確認する"})
+
+    counts: dict[str, int] = {}
+    for a in actions:
+        counts[a["action"]] = counts.get(a["action"], 0) + 1
+    save_json(args.out, {"graph_id": ledger.get("graph_id"), "counts": counts, "actions": actions})
+    if args.write_back:
+        save_json(args.ledger, ledger)
+    print("RESULT_JSON:", json.dumps(counts, ensure_ascii=False))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("init", help="Knowledge のスナップショットから台帳を作る")
+    p.add_argument("--snapshot", action="append", required=True, help="複数可（分けて読んだ list）")
+    p.add_argument("--ledger", required=True, help="作る台帳のパス（既存なら中止）")
+    p.add_argument("--graph-id", required=True,
+                   help="スナップショットを読んだグラフの id（inspect-knowledge-context status で確かめる）")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("refs", help="statements の参照名を抜き depends_on を更新する")
+    p.add_argument("--ledger", required=True)
+    p.add_argument("--write-back", action="store_true")
+    p.set_defaults(func=cmd_refs)
+
+    p = sub.add_parser("check", help="参照名を実在する名前と照合する")
+    p.add_argument("--ledger", required=True)
+    p.add_argument("--catalog", help="照合に使うカタログ JSON（省略時は Metadata API から読む）")
+    p.add_argument("--save-catalog", help="読んだカタログを保存する（再実行・オフライン用）")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("plan", help="台帳と Knowledge のスナップショットから同期計画を作る")
+    p.add_argument("--ledger", required=True)
+    p.add_argument("--snapshot", action="append", required=True, help="複数可（分けて読んだ list）")
+    p.add_argument("--check", required=True,
+                   help="台帳に対する check の結果（機械ゲート）。error / unknown・未点検・点検後の変更がある項目を blocked にする")
+    p.add_argument("--max-check-age-hours", type=float, default=DEFAULT_MAX_CHECK_AGE_HOURS,
+                   help="点検に使ったカタログの古さの上限（時間）。超えたら全項目を blocked にする")
+    p.add_argument("--out", required=True)
+    p.add_argument("--write-back", action="store_true",
+                   help="contextId と同期済みの値（synced_*）、pull の取り込みを台帳に保存する")
+    p.set_defaults(func=cmd_plan)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
