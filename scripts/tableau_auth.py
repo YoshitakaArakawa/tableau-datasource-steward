@@ -192,6 +192,19 @@ def _probe_session(server_url: str, api_version: str, access_token: str) -> dict
         return None
 
 
+def _new_server(server_url: str) -> "TSC.Server":
+    """TSC.Server pinned to the highest REST API version the server supports.
+
+    Calls use_server_version() explicitly: from tableauserverclient 0.41 the
+    constructor flag no longer resolves the version up front, so `server.version`
+    would stay at the 2.4 default and every REST call built from it would 404.
+    The call fetches /api/<x>/serverinfo unauthenticated.
+    """
+    server = TSC.Server(server_url)
+    server.use_server_version()
+    return server
+
+
 # ----- Session cache (per-user, outside any repository) -----
 CACHE_DIR_NAME = "tableau-datasource-steward"
 
@@ -346,9 +359,7 @@ def signed_in_server():
     site_name = creds["site_name"]
     port = creds["port"]
 
-    # use_server_version=True fetches /api/3.0/serverinfo unauthenticated
-    # to resolve the highest supported REST API version.
-    server = TSC.Server(server_url, use_server_version=True)
+    server = _new_server(server_url)
     api_version = server.version
 
     cached = _load_cached_session(server_url, site_name, api_version)
@@ -386,7 +397,7 @@ def _cli_logout() -> int:
         access_token = cache.get("access_token")
         if server_url and access_token:
             try:
-                tmp_server = TSC.Server(server_url, use_server_version=True)
+                tmp_server = _new_server(server_url)
                 api_version = tmp_server.version
                 req = urllib.request.Request(
                     url=f"{server_url}/api/{api_version}/auth/signout",
@@ -427,7 +438,7 @@ def _cli_status() -> int:
     if not (server_url and access_token):
         print("status: malformed cache")
         return 1
-    tmp_server = TSC.Server(server_url, use_server_version=True)
+    tmp_server = _new_server(server_url)
     session = _probe_session(server_url, tmp_server.version, access_token)
     if session is None:
         print("status: expired or invalid (next signed_in_server() will re-auth)")
