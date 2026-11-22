@@ -263,6 +263,8 @@ def _save_session(server_url: str, site_name: str, access_token: str) -> None:
         "access_token": access_token,
     }
     # Create with 0o600 up front so the token is never readable by others, even briefly.
+    # Remove any leftover tmp first: the mode argument only applies when the file is created.
+    tmp.unlink(missing_ok=True)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(json.dumps(payload, indent=2))
