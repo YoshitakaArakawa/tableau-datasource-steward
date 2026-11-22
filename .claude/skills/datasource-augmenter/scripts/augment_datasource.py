@@ -386,7 +386,7 @@ def publish_tdsx(server, item, tdsx_path: str, mode, creds):
     """編集済み .tdsx を発行する唯一の経路（運び手）。
 
     XML 編集・preflight・diff ゲート・事後検証はこの外側に置き、発行だけをここに
-    閉じ込める。公式 Tableau MCP の publish-datasource へ移すときは、この関数だけを
+    閉じ込める。公式 Tableau MCP に datasource の発行ツールが提供されたら、この関数だけを
     差し替える（ゲートと検証は残す）。戻り値は発行された DatasourceItem（.id = LUID）。
     """
     return server.datasources.publish(item, tdsx_path, mode=mode,
