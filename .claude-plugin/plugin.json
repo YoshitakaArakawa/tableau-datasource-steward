@@ -1,0 +1,11 @@
+{
+  "name": "tableau-datasource-steward",
+  "version": "0.1.0",
+  "description": "Tableau の Published Data Source をセマンティックレイヤーとして整備する Skill 群。列・calc・grain の説明の棚卸し・草案・反映、重複 calc の集約と下流 workbook の付け替え、Tableau Knowledge の Business Preference の整備と点検を行う。",
+  "author": {
+    "name": "YoshitakaArakawa"
+  },
+  "repository": "https://github.com/YoshitakaArakawa/tableau-datasource-steward",
+  "license": "MIT",
+  "keywords": ["tableau", "published-data-source", "metadata", "data-catalog", "tableau-knowledge"]
+}

@@ -71,7 +71,7 @@ Published Data Source (PDS) のメタデータを書き込む write エンジン
 ## ワークフロー
 
 進捗:
-- [ ] `python scripts/tableau_auth.py status` で cached session を確認（`no cached session` なら先にサインインを依頼。ブラウザ待ちのハングを防ぐ）
+- [ ] `uv run ${CLAUDE_PLUGIN_ROOT}/scripts/tableau_auth.py status` で cached session を確認（`no cached session` なら先にサインインを依頼。ブラウザ待ちのハングを防ぐ）
 - [ ] spec を読み、経路を判定：source 列の説明だけなら in-place、それ以外は republish
 - [ ] （source 列経路）`resolve` で 1:1 対応と addressable を確認 → `apply`。verify は REST 直読で即時確定
 - [ ] （republish 経路）spec の `mode`・`source_luid`・`target.new_name`（CreateNew 時必須）を検証。**calc を含む Overwrite だけ**は下流影響を提示し承認を取得
@@ -101,13 +101,15 @@ Published Data Source (PDS) のメタデータを書き込む write エンジン
 
 ## 認証
 
-OAuth 2.0 (Authorization Code + PKCE)。リポジトリ直下の `scripts/tableau_auth.py`（`signed_in_server()`）を共通モジュールとして import する。`.env` に `SERVER` / `SITE_NAME` を置く（テンプレートは `.env.template`）。
+OAuth 2.0 (Authorization Code + PKCE)。プラグイン直下の `${CLAUDE_PLUGIN_ROOT}/scripts/tableau_auth.py`（`signed_in_server()`）を共通モジュールとして import する。`SERVER` / `SITE_NAME` は呼び出し側プロジェクトの `.env` に置く（テンプレートは `${CLAUDE_PLUGIN_ROOT}/.env.template`）。
 
 ## 依存
 
 `tableauserverclient` / `python-dotenv` / `requests`。
 
 ## Scripts
+
+同梱スクリプトは `uv run ${CLAUDE_SKILL_DIR}/scripts/<ファイル>` で実行する（依存はスクリプト冒頭の inline metadata から入る）。出力先（`--out` / `--out-dir`）は、呼び出し時に指定された置き場か、無ければ作業ディレクトリの `work/<yyyymmdd>_<tag>/` の下を渡す。
 
 | スクリプト | 役割 |
 |---|---|

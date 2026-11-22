@@ -27,7 +27,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 - [ ] bp-format の書式に整える（英語の statement、`in` で修飾したバッククォートの名前、`name` の kind 接頭辞）
 - [ ] 訳（`translation`）と理由（`rationale`）を添えて台帳に入れる
 - [ ] `name` が台帳の既存項目と重なったら、bp-format の「名前の衝突」に従う（同じ文面なら足さない。違う文面なら名前を区別する）
-- [ ] `python ${CLAUDE_SKILL_DIR}/scripts/knowledge_ledger.py refs --ledger <台帳> --write-back` で `depends_on` を更新する
+- [ ] `uv run ${CLAUDE_SKILL_DIR}/scripts/knowledge_ledger.py refs --ledger <台帳> --write-back` で `depends_on` を更新する
 - [ ] モード3の点検を台帳に対して回し、error が無いことを確かめてから同期する
 
 ## モード2: Knowledge と同期する
@@ -36,7 +36,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 進捗:
 - [ ] `inspect-knowledge-context`（`action: status`）で対象グラフの id を確かめ、台帳の `graph_id` と一致することを確認する。以降の `inspect-knowledge-context` / `manage-knowledge-context` の呼び出しには、すべて `graphId` にこの id を渡す。`graphId` を省くと primary グラフが読み書きされるため、primary を使うときも id を明示する。`plan` は `graph_id` の無い台帳を拒否する
-- [ ] `inspect-knowledge-context`（`action: list`, `limit: 100`）で全 statement を読み、応答の JSON をそのまま `work/<yyyymmdd>_<tag>/knowledge_snapshot_before.json` に保存する（既存ファイルを上書きしない）。応答は statement 1 件が 1 行で、`plan` が `contextId` ごとにまとめる。`resultInfo.truncated` が true なら同期しない（`plan` も拒否する。100 件を超えるグラフは現状扱えない）
+- [ ] `inspect-knowledge-context`（`action: list`, `limit: 100`）で全 statement を読み、応答の JSON をそのまま `<出力先>/knowledge_snapshot_before.json` に保存する（既存ファイルを上書きしない）。応答は statement 1 件が 1 行で、`plan` が `contextId` ごとにまとめる。`resultInfo.truncated` が true なら同期しない（`plan` も拒否する。100 件を超えるグラフは現状扱えない）
 - [ ] モード3の `check` を台帳に対して、同期の直前にオンラインで回し、`check.json` を作る（`plan` は、カタログを読んでから 24 時間を超えた点検結果では書き込まない）
 - [ ] `knowledge_ledger.py plan --ledger <台帳> --snapshot <before> [--snapshot ...] --check <check.json> --out <plan.json>` で計画を作る
 - [ ] 計画の action ごとに処理する:
@@ -53,7 +53,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 データソースの発行・上書きの直後と、定期実行で回す。
 
 進捗:
-- [ ] `python scripts/tableau_auth.py status`（リポジトリ直下）で cached session を確認する
+- [ ] `uv run ${CLAUDE_PLUGIN_ROOT}/scripts/tableau_auth.py status` で cached session を確認する
 - [ ] `knowledge_ledger.py check --ledger <台帳> --save-catalog work/<yyyymmdd>_<tag>/catalog.json --out <check.json>` を実行する。台帳が無ければ、モード2の手順でスナップショットを取り、`init` で台帳を作ってから回す
 - [ ] error（`missing_datasource` / `missing_field` / `placeholder_unmatched`）は、改名先の候補を Metadata API の結果か `query-knowledge-context`（`intent: ground` のノード検索）で探し、修正案を付ける
 - [ ] unknown（`unknown_fields`）は、保存済みカタログにフィールドが無く判定できなかったもの。オンラインで再実行する
@@ -65,7 +65,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 ## 出力と報告
 
-- `work/<yyyymmdd>_<tag>/` に `knowledge_snapshot_before.json` / `knowledge_snapshot_after.json` / `plan.json` / `check.json` / `catalog.json` を置く。
+- `<出力先>/` に `knowledge_snapshot_before.json` / `knowledge_snapshot_after.json` / `plan.json` / `check.json` / `catalog.json` を置く。
 - 報告の本文は判断点だけを書く。順序は次のとおり:
   1. error の参照切れと修正案、`blocked` になった項目
   2. `conflict` / `recreate` / `orphan`
@@ -76,10 +76,12 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 ## 認証 / 依存
 
 - Knowledge の読み書き: Tableau MCP（`inspect-knowledge-context` / `manage-knowledge-context` / `query-knowledge-context`）。Tableau+ が要る。接続は環境側で用意する。
-- 点検のカタログ読取: OAuth（リポジトリ直下 `scripts/tableau_auth.py`）+ Metadata API（`scripts/metadata_api.py`）。依存は `tableauserverclient` / `python-dotenv` / `requests`。
+- 点検のカタログ読取: OAuth（プラグイン直下の `${CLAUDE_PLUGIN_ROOT}/scripts/tableau_auth.py`）+ Metadata API（`scripts/metadata_api.py`）。依存は `tableauserverclient` / `python-dotenv` / `requests`。
 - `--catalog` に保存済みのカタログを渡せば、点検はオフラインで再実行できる。
 
 ## Scripts
+
+同梱スクリプトは `uv run ${CLAUDE_SKILL_DIR}/scripts/<ファイル>` で実行する（依存はスクリプト冒頭の inline metadata から入る）。出力先（`--out` / `--out-dir`）は、呼び出し時に指定された置き場か、無ければ作業ディレクトリの `work/<yyyymmdd>_<tag>/` の下を渡す。
 
 | スクリプト | 役割 |
 |---|---|

@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """Render every view of every downstream workbook of a PDS as fresh PNGs.
 
 Post-promote sweep: after a PDS content change (Overwrite / promote), the
@@ -28,7 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 
-# --- locate shared modules in the repo-root scripts/ directory -----------------
+# --- locate shared modules in the plugin-root scripts/ directory -----------------
 def _find_repo_scripts() -> Path:
     cur = Path(__file__).resolve()
     for _ in range(8):
@@ -36,7 +44,7 @@ def _find_repo_scripts() -> Path:
         cand = cur / "scripts" / "tableau_auth.py"
         if cand.exists():
             return cand.parent
-    raise RuntimeError("repo-root scripts/ (with tableau_auth.py) not found")
+    raise RuntimeError("plugin-root scripts/ (with tableau_auth.py) not found")
 
 
 sys.path.insert(0, str(_find_repo_scripts()))

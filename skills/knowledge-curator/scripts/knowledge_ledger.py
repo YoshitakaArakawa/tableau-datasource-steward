@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """Business Preference 台帳の参照抽出・参照切れ点検・Knowledge との同期計画。
 
 Knowledge への書き込みは行わない（書き込みは Tableau MCP の manage-knowledge-context）。
@@ -162,7 +170,7 @@ def _repo_modules():
             sys.path.insert(0, str(cur / "scripts"))
             break
     else:
-        raise RuntimeError("repo-root scripts/ (with tableau_auth.py) not found")
+        raise RuntimeError("plugin-root scripts/ (with tableau_auth.py) not found")
     from tableau_auth import signed_in_server  # noqa: E402  (OAuth)
     from metadata_api import graphql  # noqa: E402
     return signed_in_server, graphql

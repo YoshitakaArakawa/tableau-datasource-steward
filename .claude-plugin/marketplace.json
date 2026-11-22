@@ -1,0 +1,14 @@
+{
+  "name": "tableau-datasource-steward",
+  "description": "tableau-datasource-steward プラグインを配布する marketplace",
+  "owner": {
+    "name": "YoshitakaArakawa"
+  },
+  "plugins": [
+    {
+      "name": "tableau-datasource-steward",
+      "source": "./",
+      "description": "Tableau の Published Data Source のメタデータ整備・calc 集約・Knowledge 整備の Skill 群"
+    }
+  ]
+}

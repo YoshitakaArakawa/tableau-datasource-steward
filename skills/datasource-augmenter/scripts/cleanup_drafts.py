@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """CreateNew で publish した draft PDS をガード付きで削除する。
 
 削除対象は result.json の published_luid（authoritative な記録）または明示 LUID。
@@ -35,7 +43,7 @@ def _find_repo_scripts() -> Path:
         cand = cur / "scripts" / "tableau_auth.py"
         if cand.exists():
             return cand.parent
-    raise RuntimeError("repo-root scripts/ (with tableau_auth.py) not found")
+    raise RuntimeError("plugin-root scripts/ (with tableau_auth.py) not found")
 
 
 sys.path.insert(0, str(_find_repo_scripts()))

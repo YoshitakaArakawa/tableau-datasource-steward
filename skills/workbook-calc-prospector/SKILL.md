@@ -56,6 +56,8 @@ OAuth（`scripts/tableau_auth.py` の `signed_in_server()`）。Metadata API は
 
 ## Scripts
 
+同梱スクリプトは `uv run ${CLAUDE_SKILL_DIR}/scripts/<ファイル>` で実行する（依存はスクリプト冒頭の inline metadata から入る）。出力先（`--out` / `--out-dir`）は、呼び出し時に指定された置き場か、無ければ作業ディレクトリの `work/<yyyymmdd>_<tag>/` の下を渡す。
+
 | スクリプト | 役割 |
 |---|---|
 | `scripts/find_hoist_candidates.py` | 下流 workbook の calc を収集し、重複 formula を hoistability 付きで `candidates.json` に出力 |

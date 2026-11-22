@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """メタデータ整備の成果物レビュー面を生成する（読取専用）。
 
 spec や result.json（書いたつもりの記録）ではなく、**ライブのカタログを GraphQL で
