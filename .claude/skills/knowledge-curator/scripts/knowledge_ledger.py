@@ -11,7 +11,7 @@ subcommands:
     plan   台帳と Knowledge のスナップショットを3方向比較し、create / update / pull を計画する
 
 usage:
-    python knowledge_ledger.py init  --snapshot knowledge.json [--snapshot more.json] --ledger bp.json
+    python knowledge_ledger.py init  --snapshot knowledge.json [--snapshot more.json] --ledger bp.json --graph-id <id>
     python knowledge_ledger.py refs  --ledger bp.json [--write-back]
     python knowledge_ledger.py check --ledger bp.json --out check.json
                                      [--catalog catalog.json | --save-catalog catalog.json]
@@ -517,6 +517,9 @@ def gate_reasons(check_path: str, ledger: dict) -> dict[str, list[str]]:
 
 def cmd_plan(args) -> None:
     ledger = load_ledger(args.ledger)
+    if not ledger.get("graph_id"):
+        # graphId を省くと MCP は primary グラフを読み書きする。台帳と別のグラフに書かないよう止める
+        raise SystemExit("ledger has no graph_id。inspect-knowledge-context status で対象グラフの id を確かめて台帳に書く")
     snap = load_snapshots(args.snapshot)
     blocked = gate_reasons(args.check, ledger)
     by_id = {c["context_id"]: c for c in snap}
@@ -530,6 +533,15 @@ def cmd_plan(args) -> None:
     claimed = {it["context_id"] for it in ledger["items"]
                if it.get("context_id") in by_id}
     names_in_ledger = {item_name(it) for it in ledger["items"]}
+    # Knowledge は同じ name の context を作れてしまう（20261122 実測）。name は照合キーなので、
+    # create / 改名で既存 context と同じ名前になる書き込みは止める
+    knowledge_names: dict[str, set[str]] = {}
+    for c in snap:
+        if c["name"]:
+            knowledge_names.setdefault(c["name"], set()).add(c["context_id"])
+
+    def name_taken(name: str, own_id: str | None) -> list[str]:
+        return sorted(knowledge_names.get(name, set()) - {own_id})
 
     def push_write(action: dict, name: str) -> dict:
         if name in blocked:
@@ -555,6 +567,12 @@ def cmd_plan(args) -> None:
                                 "reason": "同名の context が Knowledge に複数ある"})
                 continue
             if not cands:
+                taken = name_taken(name, None)
+                if taken:
+                    actions.append({"action": "conflict", "name": name, "context_ids": taken,
+                                    "reason": "同じ name の context が Knowledge にあり、別の台帳項目に紐づいている。"
+                                              "create すると name が重複する"})
+                    continue
                 actions.append(push_write({"action": "create", "name": name,
                                            "statements": item_statements(it)}, name))
                 continue
@@ -572,6 +590,8 @@ def cmd_plan(args) -> None:
         }
         if dims["name"] == "pull" and k["name"] in names_in_ledger:
             dims["name"] = "conflict"  # 取り込むと台帳の別項目と同じ名前になる
+        if dims["name"] == "push" and name_taken(name, k["context_id"]):
+            dims["name"] = "conflict"  # 改名すると Knowledge の別 context と同じ名前になる
         base = {"name": name, "context_id": k["context_id"]}
         conflicts = [d for d, v in dims.items() if v == "conflict"]
         if conflicts:
@@ -635,7 +655,8 @@ def main():
     p = sub.add_parser("init", help="Knowledge のスナップショットから台帳を作る")
     p.add_argument("--snapshot", action="append", required=True, help="複数可（分けて読んだ list）")
     p.add_argument("--ledger", required=True, help="作る台帳のパス（既存なら中止）")
-    p.add_argument("--graph-id")
+    p.add_argument("--graph-id", required=True,
+                   help="スナップショットを読んだグラフの id（inspect-knowledge-context status で確かめる）")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("refs", help="statements の参照名を抜き depends_on を更新する")

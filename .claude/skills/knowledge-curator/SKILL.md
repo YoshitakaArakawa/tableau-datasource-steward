@@ -17,7 +17,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 ## 入力
 
-- **台帳**: 利用者のリポジトリにある BP 台帳 JSON（スキーマは bp-format）。無ければ、スナップショットから `knowledge_ledger.py init` で作る。
+- **台帳**: 利用者のリポジトリにある BP 台帳 JSON（スキーマは bp-format）。無ければ、スナップショットから `knowledge_ledger.py init --graph-id <読んだグラフの id>` で作る。
 - **BP 候補**: datasource-describer の change-set の `bp_candidates[]`。台帳の item と同じ形なので、そのまま台帳に足せる。
 
 ## モード1: 台帳に足す・直す
@@ -35,16 +35,16 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 書き込みはこのモードだけで行う。
 
 進捗:
-- [ ] `inspect-knowledge-context`（`action: status`）で対象グラフを確かめる。台帳の `graph_id` が null なら primary を使う
+- [ ] `inspect-knowledge-context`（`action: status`）で対象グラフの id を確かめ、台帳の `graph_id` と一致することを確認する。以降の `inspect-knowledge-context` / `manage-knowledge-context` の呼び出しには、すべて `graphId` にこの id を渡す。`graphId` を省くと primary グラフが読み書きされるため、primary を使うときも id を明示する。`plan` は `graph_id` の無い台帳を拒否する
 - [ ] `inspect-knowledge-context`（`action: list`, `limit: 100`）で全 statement を読み、応答の JSON をそのまま `work/<yyyymmdd>_<tag>/knowledge_snapshot_before.json` に保存する（既存ファイルを上書きしない）。応答は statement 1 件が 1 行で、`plan` が `contextId` ごとにまとめる。`resultInfo.truncated` が true なら同期しない（`plan` も拒否する。100 件を超えるグラフは現状扱えない）
 - [ ] モード3の `check` を台帳に対して回し、`check.json` を作る
 - [ ] `knowledge_ledger.py plan --ledger <台帳> --snapshot <before> [--snapshot ...] --check <check.json> --out <plan.json>` で計画を作る
 - [ ] 計画の action ごとに処理する:
   - `create`: `manage-knowledge-context`（`action: create`, `name`, `statements: [{statement}, ...]`, `isGlobal: true`）
-  - `update`: `manage-knowledge-context`（`action: update`, `contextId`）。`fields` に応じて `statements`（全件を置き換える）/ `name`（`new_name` の値）を渡す
+  - `update`: `manage-knowledge-context`（`action: update`, `contextId`）。`fields` に応じて `statements` / `name`（`new_name` の値）を渡す。`statements` は全件置換で、statementId は全件振り直される（文面が同じ statement も新しい id になる）。`statements` を省けば文面は保たれる
   - `pull`: 書き込まない。Knowledge 側の編集（`fields`）を台帳に取り込む（write-back で反映）
   - `blocked`: 書き込まない。点検の error / unknown を直してから次回に回す
-  - `conflict` / `recreate` / `orphan` / `invalid`: 書き込まない。報告で判断を仰ぐ。`orphan` の削除は承認後だけ。`invalid` は Knowledge 側の名前か文面が空の context
+  - `conflict` / `recreate` / `orphan` / `invalid`: 書き込まない。報告で判断を仰ぐ。Knowledge は同じ name の context を拒否しないので、create や改名で name が既存 context と重なる項目も `conflict` になる。`orphan` の削除は承認後だけ。`invalid` は Knowledge 側の名前か文面が空の context
 - [ ] 書き込みの後にもう一度 `list` して `knowledge_snapshot_after.json` に保存し、`plan --ledger <台帳> --snapshot <after> --check <check.json> --out <plan_after.json> --write-back` で台帳に `context_id` と同期済みの値（`synced_*`）を記録する。このとき create / update した項目が `unchanged` になっていることを確かめる。`pull` で文面を取り込んだ項目は、次回の `plan` の前に `check` をやり直す（文面が変わったので、やり直すまで `blocked` になる）
 - [ ] 台帳の変更は利用者のリポジトリ側の差分として残す（commit は利用者が判断する）
 

@@ -69,7 +69,7 @@ BP は「どう使うか」を組織で共有する決まり。次の4種だけ�
 
 ```json
 {
-  "graph_id": null,
+  "graph_id": "GRAPH_ID_PLACEHOLDER",
   "items": [
     {
       "kind": "Term",
@@ -88,7 +88,8 @@ BP は「どう使うか」を組織で共有する決まり。次の4種だけ�
 
 | キー | 書く人 | 意味 |
 |---|---|---|
-| `kind` / `name` | 人 / describer の `bp_candidates[]` | `name` が同期の照合キー |
+| `graph_id` | `init` | 同期先のグラフの id。必須。すべての Knowledge 呼び出しに `graphId` として渡す |
+| `kind` / `name` | 人 / describer の `bp_candidates[]` | `name` が同期の照合キー。Knowledge は同名を拒否しないので、`plan` が重複を `conflict` で止める |
 | `statement` または `statements` | 人 / describer の `bp_candidates[]` | BP 本体。1本なら `statement`、Knowledge 側で複数に分かれている context は `statements`（配列） |
 | `translation` / `rationale` | 人 | 訳と理由。Knowledge には送らない |
 | `depends_on` | `refs --write-back` | statement から抜いた参照名。手で書かない |
