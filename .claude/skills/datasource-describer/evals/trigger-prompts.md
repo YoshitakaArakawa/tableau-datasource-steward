@@ -13,6 +13,7 @@ note: description・本文の修正時に fresh session で全プロンプトを
 - 寄せた calc に説明を付けて
 - 既存の説明が現データに合っているか点検して
 - datasource の説明欄に build メモが入っているので grain に直したい
+- 列の説明に使い方が混ざっていないか見て、Business Preference に回すべき文を切り分けて
 
 ## 起動すべきでない（should not fire）
 

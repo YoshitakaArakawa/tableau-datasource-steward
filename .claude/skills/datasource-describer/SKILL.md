@@ -1,15 +1,18 @@
 ---
 name: datasource-describer
-description: Published Data Source の列・calculated field・datasource 自体（grain）の説明文（description）の草案を作り、datasource-augmenter 用の change-set に整える Skill。列名・型・サンプル値・formula・WB 側 description を手がかりに未設定の説明を埋め、各説明に出所（extracted / inferred）と衝突フラグを付ける。加えて inspector が拾った既存 desc・grain を検証し（valid / stale / off_format / unverifiable）、データとの乖離や grain フォーマット不適合（build 注記等）は修正草案にする。列の説明を埋めたい・データ辞書を整備したい・grain を記述したい・寄せた calc に説明を付けたい・既存の説明が古くないか点検したいときに使う。注入そのものは augmenter が行う。
+description: Published Data Source の列・calculated field・datasource 自体（grain）の説明文（description）の草案を作り、datasource-augmenter 用の change-set に整える Skill。列名・型・サンプル値・formula・WB 側 description を手がかりに未設定の説明を埋め、各説明に出所（extracted / inferred）と衝突フラグを付ける。各文を「それは何か（説明）/ どう使うか（Business Preference 候補）/ 構造（calc）」に振り分け、使い方は説明に書かない。加えて inspector が拾った既存 desc・grain を検証し（valid / stale / off_format / misplaced / unverifiable）、データとの乖離・grain フォーマット不適合・使い方の混入は修正草案にする。列の説明を埋めたい・データ辞書を整備したい・grain を記述したい・寄せた calc に説明を付けたい・既存の説明が古くないか点検したい・説明に紛れた使い方を切り分けたいときに使う。注入そのものは augmenter が行う。
 ---
 
 # datasource-describer
 
-PDS の列・calc・datasource 自体（grain）の description 草案を作り、既存 desc の妥当性も検証する分析 Skill。読取・推論のみ（注入は `datasource-augmenter`）。担う仕事は3つ:
+PDS の列・calc・datasource 自体（grain）の description 草案を作り、既存 desc の妥当性も検証する分析 Skill。読取・推論のみ（注入は `datasource-augmenter`）。担う仕事は4つ:
 
 1. **未設定を埋める**: description が無い列・calc・grain に草案を作る
 2. **grain を書く**: datasource が「何の 1 行か」のステートメント草案を作る
 3. **既存を検証する**: inspector が拾った既存 desc・grain が現在のデータに対して適切かを判定し、乖離は修正草案にする
+4. **置き場所を振り分ける**: 草案・既存 desc の各文を [references/placement-rules.md](references/placement-rules.md) で振り分ける。説明に残すのは「それは何か」だけで、使い方は `bp_candidates[]`、1つの PDS 内で式にできる比べ方は `structure_findings[]` に出す
+
+**最優先の規範（振り分けの判定）**: その文は、問う人・問い・場面が変わっても真か。真なら説明に書き、変わりうるなら BP 候補に回す。説明は BP・グラフ・スキルを参照しない。同じ語を説明と BP の両方で定義しない。
 
 各説明に**出所（provenance）**を付け、自動解決できない衝突・stale 判定は orchestrator の報告でユーザー確認に回す。
 
@@ -25,6 +28,7 @@ PDS の列・calc・datasource 自体（grain）の description 草案を作り�
 - [ ] 各列について、列名・型・role から説明を起こせるか判断
 - [ ] 列名だけで意味が曖昧な列は `query-datasource` でサンプル値を確認（dimension は distinct 上位、measure は MIN/MAX/AVG 等の集計で代表値）
 - [ ] 「description の品質規範」に沿って簡潔で一貫した草案を作る。業務語彙・命名規則が不明でも途中でユーザー確認に止まらず、`source: inferred` として orchestrator 報告に回す
+- [ ] 草案の各文を placement-rules で振り分ける。`context` の文は `bp_candidates[]`、`structure` の文は `structure_findings[]` に移し、`drop` の文は消す
 - [ ] 各説明に provenance（`source` / 衝突時は `variants`）を付ける
 - [ ] `datasource-augmenter` の change-set `descriptions[]` に整えて引き渡す
 
@@ -45,7 +49,7 @@ datasource が「何の 1 行か」を 1〜2 文で書く。列 desc とは別�
 進捗:
 - [ ] inspector の grain 現在値を確認（未設定なら草案を作る、設定済みなら検証ワークフローへ）
 - [ ] スキーマ（キー列・粒度を示す列）と、必要なら `query-datasource` の行数特性から「1 行 = 何か」を推定
-- [ ] 「grain フォーマット」（品質規範）に沿った grain 文を作る（例「注文明細行が 1 行。1 行 = 1 商品 × 1 注文」）
+- [ ] 「grain フォーマット」（品質規範）に沿った grain 文を作る（例「注文明細行が 1 行。1 行 = 1 商品 × 1 注文」）。既定の日付などの選び分けは grain に書かず `bp_candidates[]` に回す
 - [ ] change-set の `datasource.description` として引き渡す（provenance は `source`）
 
 ## ワークフロー（既存 desc・grain の検証）
@@ -54,13 +58,16 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
 
 進捗:
 - [ ] **フォーマット適合を先に判定する**（grain）：既存の datasource.description が「grain フォーマット」（品質規範）に沿っているか。build 注記・移行メモ・処理履歴（例「stg をそのまま full refresh で mart 化」）は grain ではない → `off_format`。フォーマット準拠の grain 草案を作って置換提案し、原文は `previous_text` に保全する。データ照合（次ステップ以降）は適合している記述だけに行う
-- [ ] 既存 desc・grain を「主張」に分解する：取りうる値の集合 / 単位・集計 / 粒度（grain）/ 派生元・境界条件
+- [ ] 既存 desc・grain を「主張」に分解する：取りうる値の集合 / 単位・加算性 / 粒度（grain）/ 派生元・境界条件
 - [ ] 主張ごとに、照合が必要なものだけ現データと突き合わせる：
   - 列挙値の主張 → `query-datasource` の distinct 上位と照合
-  - 単位・集計の主張 → default aggregation・サンプルの桁/符号と照合
+  - 単位・加算性の主張 → サンプルの桁/符号と照合
   - grain の主張 → キー列の distinct・行数特性と照合
-- [ ] 各 desc に verdict を付ける：`valid`（現データと整合）/ `stale`（乖離あり。乖離内容と修正草案を付す）/ `off_format`（grain フォーマット不適合。修正草案を付す）/ `unverifiable`（現データからは確認できない。理由を付す）
-- [ ] `stale` / `off_format` は修正草案を `descriptions[]`（grain は `datasource.description`）に載せ、原文を `previous_text` に残す。判断は orchestrator 報告でユーザー確認に回す（黙って上書きしない）
+- [ ] 既存 desc・grain の各文を placement-rules で振り分ける。`context` / `structure` / `drop` の文が混ざっていれば `misplaced`
+- [ ] 各 desc に verdict を付ける：`valid`（現データと整合）/ `stale`（乖離あり。乖離内容と修正草案を付す）/ `off_format`（grain フォーマット不適合。修正草案を付す）/ `misplaced`（使い方・集計の指示・コンテキストへの参照が混ざっている。「それは何か」だけ残した修正草案を付し、切り出した文は `bp_candidates[]` / `structure_findings[]` へ）/ `unverifiable`（現データからは確認できない。理由を付す）。複数当たるときは `stale` → `off_format` → `misplaced` の順に1つ選び、修正草案は全部を直す
+- [ ] `stale` / `off_format` / `misplaced` の修正草案は `audits[]` の `revised_text` にだけ置き、原文を `previous_text` に残す。`descriptions[]` / `datasource.description` には載せない（載せると augmenter がそのまま書き込み、ユーザー確認より先に上書きされる）
+- [ ] `stale` / `off_format` / `misplaced` は、判断を orchestrator 報告でユーザー確認に回す。承認された `revised_text` だけを、承認後に `descriptions[]`（grain は `datasource.description`）へ移す
+- [ ] 修正草案で既存の文から `context` の文を消すときは、verdict に関係なく、行き先（`bp_candidates[]` の `name`）を audit の `moved_to` に記録する（grain の既定の日付は `off_format` になるが、同じく記録する）。報告では「消す文」と「行き先の BP 候補」を並べて示し、使い方が説明からも BP からも消えるのを防ぐ。BP の登録は本 Skill の範囲外
 - [ ] コスト管理は「サンプル値の使い方」に従う（行レベル取得を避ける）
 
 ## カバレッジ（取りこぼしを防ぐ）
@@ -68,7 +75,7 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
 「未 desc 列ゼロ」を目標にするが、機械的に全列へ文を書くと同義反復（列名の言い換え）を量産し品質規範に反する。したがって**全列を「処理済み」にする**ことを保証し、文を書けない列は捨てずに残す。
 
 - gap の各列について、情報量のある desc を書けたものは `descriptions[]`、真に情報を足せない列（不透明 ID 等）は `skipped[]` に理由付きで残す
-- 完了条件（検算）：`len(新規 descriptions) + len(skipped) == inspector の gap 列数`（gap は inspector が擬似列と skip 候補を除いた実質未整備数）。inspector の skip 候補を採用した場合はそのまま、採用せず説明を書いた場合は `descriptions[]` 側に計上する。未処理列が無いことを確認する
+- 完了条件（検算）：`len(新規 descriptions) + len(skipped) == inspector の gap 列数`（gap は inspector が擬似列と skip 候補を除いた実質未整備数）。inspector の skip 候補を採用した場合はそのまま、採用せず説明を書いた場合は `descriptions[]` 側に計上する。草案の文がすべて `context` / `structure` / `drop` に振り分けられて説明が残らなかった列は、`skipped[]` に理由（行き先）付きで入れる。未処理列が無いことを確認する
 
 ## サンプル値の使い方
 
@@ -77,7 +84,7 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
 
 ## 出力（change-set 候補）
 
-列の説明は `descriptions[]`、hoist calc の説明は `calcs[]` 各要素の `description`、grain は `datasource.description` に載せる。検証結果は `audits[]`、書けなかった列は `skipped[]` に残す。各説明に provenance を添える：
+列の説明は `descriptions[]`、hoist calc の説明は `calcs[]` 各要素の `description`、grain は `datasource.description` に載せる。検証結果は `audits[]`、書けなかった列は `skipped[]`、BP 候補は `bp_candidates[]`、構造で持つべきものは `structure_findings[]` に残す。各説明に provenance を添える：
 
 ```json
 {
@@ -100,24 +107,48 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
       "claim": "取りうる値は Consumer / Corporate / Home Office",
       "observed": "distinct に Small Business が追加されている",
       "previous_text": "顧客セグメント（Consumer / Corporate / Home Office）",
-      "revised_text": "顧客セグメント（Consumer / Corporate / Home Office / Small Business）" }
+      "revised_text": "顧客セグメント（Consumer / Corporate / Home Office / Small Business）" },
+    { "field_caption": "Revenue", "verdict": "misplaced",
+      "claim": "説明に列の選び分け（使い方）が混ざっている",
+      "previous_text": "請求ベースの売上金額。会計年度で見るときはこちらを使う。",
+      "revised_text": "請求ベースの売上金額。",
+      "moved_to": ["Term: Revenue for fiscal-period questions (billing)"] }
   ],
   "skipped": [
     { "field_caption": "ID_売付", "reason": "不透明な内部 ID。列名・型・サンプルから業務的意味を起こせない" }
+  ],
+  "bp_candidates": [
+    { "kind": "Term", "name": "Term: Revenue for fiscal-period questions (billing)",
+      "statement": "When the question mentions fiscal periods, use `Revenue` in `billing`.",
+      "translation": "会計期間を問われたら `billing` の `Revenue` を使う。",
+      "rationale": "既存の列 desc から切り出した列の選び分け（C1 / C2）",
+      "origin": { "pds": "billing", "field_caption": "Revenue", "previous_text": "請求ベースの売上金額。会計年度で見るときはこちらを使う。" },
+      "source": "extracted" }
+  ],
+  "structure_findings": [
+    { "field_caption": "Profit", "type": "calc_candidate",
+      "previous_text": "利益。比べるときは売上で割った利益率で見る。",
+      "suggested_formula": "SUM([Profit]) / SUM([Sales])",
+      "reason": "1つの PDS 内で式にできる比べ方（calc 注入の候補）" }
   ]
 }
 ```
 
-`stale` の `revised_text` は `descriptions[]`（grain なら `datasource.description`）にも載せ、augmenter がそれを注入する。`audits[]` / `skipped[]` と provenance フィールド（`source` / `conflict` / `variants` / `previous_text`）は **orchestrator がユーザー報告で「抽出 / 推論」「衝突」「stale の原文」を区別するための注記**。augmenter は自身が定義したキーしか読まないため、これらの注記は change-set にそのまま残してよい（キーの正典は augmenter の references/change-set-format.md）。
+`bp_candidates[]` の各要素は Business Preference 台帳の item と同じ形（`kind` / `name` / `statement` / `translation` / `rationale`）に揃え、出所を `origin` に残す。`name` は台帳の照合キーなので、1つのデータソースに限った判断なら末尾に必ず `(<データソース名>)` を付ける。`statement` は英語で書き、データソース名・フィールド名は正確な名前をバッククォートで囲む。
+
+`stale` / `off_format` / `misplaced` の `revised_text` は、ユーザーが承認するまで `audits[]` にだけ置く。承認後に `descriptions[]`（grain なら `datasource.description`）へ移したものだけを augmenter が注入する。`audits[]` / `skipped[]` / `bp_candidates[]` / `structure_findings[]` と provenance フィールド（`source` / `conflict` / `variants` / `previous_text` / `moved_to`）は **orchestrator がユーザー報告で「抽出 / 推論」「衝突」「stale の原文」を区別するための注記**。augmenter は自身が定義したキーしか読まないため、これらの注記は change-set にそのまま残してよい（キーの正典は augmenter の references/change-set-format.md）。
 
 ## description の品質規範
 
-dbt Semantic Layer の指針（grain / 単位 / 包含 / 取りうる値を明示し、列名の同義反復を避ける）を列レベルに適用する。
+説明に書くのは「それは何か」だけ（placement-rules の M1〜M5）。dbt Semantic Layer の指針（grain / 単位 / 包含 / 取りうる値を明示し、列名の同義反復を避ける）を列レベルに適用する。
 
+- 核を先頭150字に入れる。Tableau Agent が索引に入れるのは先頭150字（計4000字まで）。
 - 言い換え禁止：列名の和訳だけ（`Order Date` →「注文日」）は情報量ゼロ。列名だけでは分からないこと（基準時点・タイムゾーン・null の意味）を書く。
-- measure は単位・集計・包含を必須：通貨/個数、税抜・割引後か、inspector が拾う default aggregation と整合させる。
-- dimension は取りうる値の集合を示す：列名で曖昧なものだけ `query-datasource` で distinct 上位を確認して列挙する。
-- calc 列は派生元と境界条件（しきい値・case 分岐）を書く。
+- measure は単位と包含を必須：通貨/個数、税抜・割引後か。加算できない measure（単価・率・残高）はそのことを書く（例「単価のため合計に意味はない」）。「合計で集計する」等の指示は書かない（集計関数はクエリ側が選ぶ）。
+- dimension は取りうる値の集合を、列名で曖昧なものだけ示す：`query-datasource` で distinct 上位を確認して列挙する。
+- calc 列は派生元と境界条件（しきい値・case 分岐）を書く。似た calc どうしは、同じ型の振る舞いを同じ言い回しで揃える。
+- 書かない：日付・列・データソースの選び分け、比べ方、問いの言葉の解釈、BP・グラフ・スキルへの参照。これらは `bp_candidates[]` に回す。
+- 他の列名は定義の材料としてだけ使う（「X を使う」と指示しない）。
 - 文体を統一：体言止めか「〜を表す」に揃え、主語を省き 1〜2 文。change-set 内で文体を揃えてから augmenter に渡す。
 
 ### grain フォーマット（datasource.description の正典）
@@ -125,7 +156,7 @@ dbt Semantic Layer の指針（grain / 単位 / 包含 / 取りうる値を明�
 datasource.description に書いてよいのは grain ステートメントのみ。草案の生成と既存記述の検証（`off_format` 判定）の両方でこの定義を使う。
 
 - **必須**: 「1 行 = 何か」を明示する文を含む。粒度・主キー相当・対象範囲を書く。1〜2 文。
-- **禁止**: build 注記・エンジニアリングメモ（生成手順・refresh 方式・移行経緯・行数 parity 等。これらは PDS の consumer に意味を持たない）。datasource 名の言い換えだけの文。
+- **禁止**: build 注記・エンジニアリングメモ（生成手順・refresh 方式・移行経緯・行数 parity 等。これらは PDS の consumer に意味を持たない）。datasource 名の言い換えだけの文。既定の日付・推奨する見方などの選び分け（BP 候補に回す）。
 - 列 desc とは別レイヤー（テーブル全体の意味）。注入は augmenter が publish 時に行う。
 
 ### datasource 文脈の原則（列名の同名異義）

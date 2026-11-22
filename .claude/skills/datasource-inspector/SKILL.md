@@ -10,7 +10,7 @@ description: Published Data Source のスキーマとメタデータを読み取
 ## 読取経路
 
 - **主経路は Metadata API (GraphQL)**。`read_schema.py` が列（name / dataType / role / isHidden / description / upstream 1:1）・既存 calc（formula / description）・grain（datasource description）を 1 クエリで返す。バッチで安定し、per-PDS の往復が無い。
-- **MCP `get-datasource-metadata` は補完**。defaultAggregation 等 GraphQL に無い属性が必要なときだけ呼ぶ。並列呼び出しで断続的に 401 を返すことがあるため、バッチの主経路にしない。
+- **MCP `get-datasource-metadata` は補完**。GraphQL に無い属性が必要なときだけ呼ぶ。並列呼び出しで断続的に 401 を返すことがあるため、バッチの主経路にしない。
 - GraphQL は論理テーブル自体を ColumnField として数える（名前が upstream テーブル名と一致し upstream 列を持たない擬似列）。`read_schema.py` が除外して `pseudo_table_fields_excluded` に記録する。
 
 ## ワークフロー
@@ -19,7 +19,6 @@ description: Published Data Source のスキーマとメタデータを読み取
 - [ ] `python scripts/tableau_auth.py status` で cached session を確認（`no cached session` なら先にサインインを依頼）
 - [ ] 対象 PDS の LUID を確認（無ければ `list-datasources` で名前から特定）
 - [ ] `read_schema.py --pds-luid <luid> --out schema.json` を実行
-- [ ] defaultAggregation が必要な場合のみ `get-datasource-metadata` で補完
 - [ ] 棚卸しレポートを書く：grain の現在値、説明あり/なしの列（既存 desc は**全文**）、role、既存 calc 一覧、skip 候補
 - [ ] メタデータ欠落（`gap`: description 未設定の列・calc、grain 未設定）を明示
 

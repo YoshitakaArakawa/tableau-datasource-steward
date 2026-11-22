@@ -86,4 +86,4 @@ republish は connection オブジェクトを作り直すため、embed 済み�
 
 `workbook-calc-prospector` が出した hoist 候補をそのまま calcs に流す場合、**table calc（WINDOW_*, INDEX, LOOKUP, RUNNING_* 等）は PDS 側 calc としては意味が変わりうる**ため、prospector 側で除外・警告済みであることを前提とする。operand が source PDS に存在しない calc は publish 時に formula エラーになる。
 
-`datasource-describer` が付ける provenance フィールド（`source` = `extracted` | `inferred`、`conflict`、`variants`、`previous_text`）や、トップレベルの `audits[]` / `skipped[]`（既存 desc の検証結果・記述をスキップした列の記録）が change-set に含まれることがある。これらは orchestrator 報告用の注記で、**augmenter は上記の定義済みキーのみ参照しスキップする**ため、change-set にそのまま残してよい。
+`datasource-describer` が付ける provenance フィールド（`source` = `extracted` | `inferred`、`conflict`、`variants`、`previous_text`、`moved_to`）や、トップレベルの `audits[]` / `skipped[]` / `bp_candidates[]` / `structure_findings[]`（既存 desc の検証結果・記述をスキップした列・Business Preference の候補・構造で持つべきものの記録）が change-set に含まれることがある。これらは orchestrator 報告用の注記で、**augmenter は上記の定義済みキーのみ参照しスキップする**ため、change-set にそのまま残してよい。

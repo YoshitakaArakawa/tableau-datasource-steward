@@ -48,7 +48,7 @@ Tableau の Published Data Source は、実質的に組織のセマンティッ�
 | Skill | 系統 | 役割 |
 |---|---|---|
 | `datasource-inspector` | READ | PDS の現状棚卸し（列・既存 calc・grain・説明カバレッジ） |
-| `datasource-describer` | ANALYZE | 説明草案の生成と既存説明の検証（valid / stale） |
+| `datasource-describer` | ANALYZE | 説明草案の生成、既存説明の検証（valid / stale / misplaced）、使い方の文を BP 候補へ振り分け |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc 検出 |
 | `datasource-augmenter` | WRITE | change-set の注入・publish・round-trip 検証 |
 | `workbook-rewirer` | WRITE | 下流 workbook の PDS 付け替え・calc 参照差し替え・view 描画検証 |

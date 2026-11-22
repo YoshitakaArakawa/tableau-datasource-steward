@@ -9,7 +9,7 @@
 | Skill | 系統 | 責務 |
 |---|---|---|
 | `datasource-inspector` | READ | PDS のスキーマ・メタデータ・既存 calc を GraphQL 1 クエリで棚卸しし、整備 gap を洗い出す（既存 desc 全文・grain・擬似列除外・skip 候補付き） |
-| `datasource-describer` | ANALYZE | 列・calc・datasource（grain）の説明草案を作り、既存 desc・grain が現データに適切かも検証（valid/stale）。出所付きで change-set 化 |
+| `datasource-describer` | ANALYZE | 列・calc・datasource（grain）の説明草案を作り、既存 desc・grain が現データに適切かも検証（valid / stale / off_format / misplaced）。使い方の文は BP 候補、1 PDS 内で式にできる比べ方は calc 候補に振り分ける。出所付きで change-set 化 |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc を検出し hoist 候補（+ WB 側 desc・コメント込み formula）を出す |
 | `datasource-augmenter` | WRITE | change-set を受けて PDS メタデータを書き込む。source 列 desc は Catalog in-place、field desc / grain は desc-only Overwrite（ゲート付き）、calc は CreateNew publish。いずれも機械検証まで |
 | `workbook-rewirer` | WRITE | hoist 後の workbook を書き換え（PDS 付け替え + calc 参照差し替え）→ publish → view 描画検証 |
@@ -23,6 +23,7 @@
 - 「現状を見たい / どの列に説明が無いか」→ `datasource-inspector`
 - 「列の説明を埋めたい / データ辞書 / grain（粒度）を書きたい」→ `datasource-describer`（必要なら先に inspector）
 - 「既存の説明が現データに合っているか点検したい」→ `datasource-describer`（検証モード。inspector が既存 desc・grain を渡す）
+- 「説明に紛れた使い方を切り分けたい」→ `datasource-describer`（検証モードの `misplaced`）
 - 「共通の計算を PDS に寄せたい / 重複 calc を探す」→ `workbook-calc-prospector`
 - 「説明 / calc を実際に PDS へ反映したい」→ `datasource-augmenter`
 - 「寄せた calc を workbook で実際に使わせたい / workbook のデータソースを付け替えたい / rewired 版で動作確認したい」→ `workbook-rewirer`
@@ -38,8 +39,9 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 3. 書き込み（**バッチ実行の宣言 1 回で自走。per-PDS の事前確認は置かない**）:
    - source 列 desc → `update_source_column_descs.py apply`（in-place。PDS を作らない・触らない）
    - field desc / grain → `batch_augment.py run`（desc-only Overwrite。preflight + diff ゲート + LUID 検証を各 PDS で機械適用、manifest で再開可能）
+   - 書くのは未設定を埋めた `descriptions[]` / `datasource.description` だけ。既存の説明を直す草案（`audits[]` の `stale` / `off_format` / `misplaced`）は書かず、報告で承認を得てから次のバッチで `descriptions[]` に移して書く
 4. **成果物レビュー面の生成**: 反映後に `scripts/metadata_report.py --projects <対象>` で**ライブカタログを読み直した** HTML レポート（per-PDS の grain + 全列 description + coverage 集計）を生成し、報告に添える。ユーザーが Tableau GUI を巡回せずに「実際に何が入ったか」を網羅確認できる面を必ず用意する（書いた spec ではなく読み直した実物を示す）
-5. **orchestrator 報告**: 本文は**要約と判断点のみ**（verified 集計、gate_failed / abort の理由、`inferred` で確信度の低いもの、rollback 手順、レビュー面への参照）。全 luid・全変更の一覧は `work/` にファイル出力し、本文に列挙しない。折りたたみ目的で HTML `<details>` を使わない（ターミナルの Markdown では描画されない）
+5. **orchestrator 報告**: 本文は**要約と判断点のみ**（verified 集計、gate_failed / abort の理由、`inferred` で確信度の低いもの、承認待ちの修正草案（`audits[]` の原文・修正案・`moved_to`）、BP 候補（`bp_candidates[]`）と calc 候補（`structure_findings[]`）の件数と代表例、rollback 手順、レビュー面への参照）。全 luid・全変更の一覧は `work/` にファイル出力し、本文に列挙しない。折りたたみ目的で HTML `<details>` を使わない（ターミナルの Markdown では描画されない）
 
 ## ワークフロー：重複 calc を寄せて説明も付ける
 
@@ -58,6 +60,19 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 この報告で承認が得られたら、本番への反映に進む: PDS の promote（`Overwrite`）→ `workbook-rewirer` の掃除モード（本番 PDS を `pds.luid` に指定。repoint なしの calc 差し替え）で本番 WB を `Overwrite`。CreateNew はビットを守るが**ユーザーの注意は守らない**ため、報告の legibility がこのワークフローの実質的な安全装置。
 
 ## 横断ポリシー
+
+### メタデータとコンテキストを分ける
+
+| 層 | 答える問い | 置き場 |
+|---|---|---|
+| メタデータ層 | それは何か | PDS の構造（calc・名前・関係）と説明（列・calc・grain） |
+| コンテキスト層 | どう使うか | 組織で共有する決まりは Tableau Knowledge の Business Preference（BP）。データに依らないエージェントの作法はスキル |
+
+1. **判定**: その文は、問う人・問い・場面が変わっても真か。真ならメタデータ、変わりうるならコンテキスト。
+2. **依存は一方向**: コンテキストはメタデータを名前で参照してよい。メタデータはコンテキストを参照しない。
+3. **一か所で定義する**: 同じ語を両方の層で定義しない。
+
+置き場所の優先順は **構造 → 説明 → 例 → 文の指示（BP）**。この規範は Tableau 公式（説明に典型的な使い方も書く）より厳しい。説明だけを読むエージェントに使い方が届かない代償は、構造を先にすることで小さくする。既定の集計は扱わない（VizQL Data Service のクエリでは集計関数をクライアントが選ぶ）。加算できない measure は、その性質を説明に書く。判定表は describer の `references/placement-rules.md` を正とする。
 
 ### 書き込み方式（DM/Catalog 有効を前提とする）
 
@@ -78,7 +93,7 @@ desc-only Overwrite が準非破壊と言えるのは、人間の目視承認を
 
 ### 認証
 - Skill から Tableau API を叩くときは **OAuth**（`scripts/tableau_auth.py` の `signed_in_server()`）を使う。
-- 読取の主経路は Metadata API GraphQL（`scripts/metadata_api.py`）。列メタ・既存 calc・grain・lineage を一括で安定して読める。Tableau MCP はサンプル値取得（`query-datasource`）と defaultAggregation 等の補完に使う（並列呼び出しで断続 401 のためバッチの主経路にしない）。
+- 読取の主経路は Metadata API GraphQL（`scripts/metadata_api.py`）。列メタ・既存 calc・grain・lineage を一括で安定して読める。Tableau MCP はサンプル値取得（`query-datasource`）と、GraphQL に無い属性の補完に使う（並列呼び出しで断続 401 のためバッチの主経路にしない）。
 - **MCP サーバーの用意（接続方式・認証）は利用者の Claude 環境側の責務**。repo は特定の接続を強制しない（project スコープで設定したい場合の例として PAT/npx 版 `.mcp.json.template` を同梱）。Skill は datasource 読取ツール（`get-datasource-metadata` / `query-datasource` / `list-datasources` 等）を提供する MCP サーバーが利用可能であることを前提にする。ツールは**サーバー名 prefix ではなく tool 名（基底名）で参照**し、環境側のサーバー名に依存しない。
 
 ### 公開前提の規範
