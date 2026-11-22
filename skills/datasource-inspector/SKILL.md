@@ -16,7 +16,7 @@ description: Published Data Source のスキーマとメタデータを読み取
 ## ワークフロー
 
 進捗:
-- [ ] `python scripts/tableau_auth.py status` で cached session を確認（`no cached session` なら先にサインインを依頼）
+- [ ] `uv run ${CLAUDE_PLUGIN_ROOT}/scripts/tableau_auth.py status` で cached session を確認（`no cached session` なら先にサインインを依頼）
 - [ ] 対象 PDS の LUID を確認（無ければ `list-datasources` で名前から特定）
 - [ ] `read_schema.py --pds-luid <luid> --out schema.json` を実行
 - [ ] 棚卸しレポートを書く：grain の現在値、説明あり/なしの列（既存 desc は**全文**）、role、既存 calc 一覧、skip 候補
@@ -40,9 +40,11 @@ description: Published Data Source のスキーマとメタデータを読み取
 ## 認証 / 依存
 
 - 主経路: OAuth（`scripts/tableau_auth.py`）+ `scripts/metadata_api.py`。依存 `tableauserverclient` / `python-dotenv` / `requests`。
-- 補完: Tableau MCP。接続は環境側で用意された MCP サーバーを前提（接続の詳細は CLAUDE.md の「認証」を正とする）。
+- 補完: Tableau MCP。接続は環境側で用意された MCP サーバーを前提（接続の詳細は `${CLAUDE_PLUGIN_ROOT}/skills/steward/references/policies.md` の「認証と MCP」を正とする）。
 
 ## Scripts
+
+同梱スクリプトは `uv run ${CLAUDE_SKILL_DIR}/scripts/<ファイル>` で実行する（依存はスクリプト冒頭の inline metadata から入る）。出力先（`--out` / `--out-dir`）は、呼び出し時に指定された置き場か、無ければ作業ディレクトリの `work/<yyyymmdd>_<tag>/` の下を渡す。
 
 | スクリプト | 役割 |
 |---|---|

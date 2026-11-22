@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """メタデータ整備バッチの orchestrator。コスト見積もり（estimate）と一括実行（run）。
 
 estimate: ユーザーが指定した範囲（project / PDS 名 / LUID）に対し、per-PDS で
@@ -29,14 +37,14 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "scripts"))
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN_ROOT / "scripts"))
 import requests  # noqa: E402
 from tableau_auth import signed_in_server  # noqa: E402
 from metadata_api import graphql  # noqa: E402
 
-AUGMENT = REPO / ".claude/skills/datasource-augmenter/scripts/augment_datasource.py"
-READ_SCHEMA = REPO / ".claude/skills/datasource-inspector/scripts/read_schema.py"
+AUGMENT = PLUGIN_ROOT / "skills/datasource-augmenter/scripts/augment_datasource.py"
+READ_SCHEMA = PLUGIN_ROOT / "skills/datasource-inspector/scripts/read_schema.py"
 
 # 警告しきい値。republish は 1 件ごとに extract 込み .tdsx の DL/UL 往復が要るため、
 # 件数と総量の両方で「大変さ」を見積もる（値は 45 PDS 一括実験の体感に基づく目安）
@@ -139,7 +147,7 @@ def cmd_estimate(server, projects: set[str], names: set[str], luids: set[str],
 
 # --- run -----------------------------------------------------------------------
 def _auth_precheck() -> None:
-    r = subprocess.run([sys.executable, str(REPO / "scripts/tableau_auth.py"), "status"],
+    r = subprocess.run([sys.executable, str(PLUGIN_ROOT / "scripts/tableau_auth.py"), "status"],
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit(

@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """PDS のスキーマ棚卸しを Metadata API (GraphQL) 1 クエリで取得する。
 
 列（name / dataType / role / isHidden / description / upstream 1:1）・既存 calc
@@ -29,7 +37,7 @@ def _find_repo_scripts() -> Path:
         cur = cur.parent
         if (cur / "scripts" / "tableau_auth.py").exists():
             return cur / "scripts"
-    raise RuntimeError("repo-root scripts/ (with tableau_auth.py) not found")
+    raise RuntimeError("plugin-root scripts/ (with tableau_auth.py) not found")
 
 
 sys.path.insert(0, str(_find_repo_scripts()))

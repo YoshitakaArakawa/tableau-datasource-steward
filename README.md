@@ -1,6 +1,6 @@
 # tableau-datasource-steward
 
-Tableau Server / Tableau Cloud の **Published Data Source (PDS)** を、組織のセマンティックレイヤーとして継続メンテナンスする Agent です。列の説明・粒度（grain）・計算フィールドといったメタデータの整備を、Claude Code 上の Skill 群が Tableau API 経由で肩代わりします。
+Tableau Server / Tableau Cloud の **Published Data Source (PDS)** を、組織のセマンティックレイヤーとして継続メンテナンスするための Claude Code プラグインです。列の説明・粒度（grain）・計算フィールドといったメタデータの整備を、プラグインの Skill 群が Tableau API 経由で肩代わりします。どのプロジェクトからでも、インストールすれば同じ Skill を呼べます。
 
 できることは大きく 3 つです。
 
@@ -44,10 +44,11 @@ Tableau の Published Data Source は、実質的に組織のセマンティッ�
 
 ## 構成
 
-中核ロジックは `.claude/skills/` 配下の 6 Skill に分かれ、ルーティングと横断ポリシーは orchestrator（[CLAUDE.md](CLAUDE.md)）が担います。データは「読取・提案（副作用なし）→ change-set → write」の一方向に流れます。write は PDS 向け・workbook 向け・Knowledge 向けの 3 Skill だけです。
+中核ロジックは `skills/` 配下の 6 Skill に分かれ、ルーティングと横断ポリシーは入口 Skill `steward` が担います。データは「読取・提案（副作用なし）→ change-set → write」の一方向に流れます。write は PDS 向け・workbook 向け・Knowledge 向けの 3 Skill だけです。
 
 | Skill | 系統 | 役割 |
 |---|---|---|
+| `steward` | 入口 | どの Skill をどの順で使うかの判断、複数 Skill をまたぐワークフロー、承認ゲート・出力先・報告の規範 |
 | `datasource-inspector` | READ | PDS の現状棚卸し（列・既存 calc・grain・説明カバレッジ） |
 | `datasource-describer` | ANALYZE | 説明草案の生成、既存説明の検証（valid / stale / misplaced）、使い方の文を BP 候補へ振り分け |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc 検出 |
@@ -55,9 +56,9 @@ Tableau の Published Data Source は、実質的に組織のセマンティッ�
 | `workbook-rewirer` | WRITE | 下流 workbook の PDS 付け替え・calc 参照差し替え・view 描画検証 |
 | `knowledge-curator` | WRITE | Knowledge の Business Preference の台帳管理・同期、参照切れと二重定義の点検 |
 
-各 Skill の詳細な責務分担は [CLAUDE.md](CLAUDE.md) の Skill マップを正とします。
+各 Skill の詳細な責務分担は [skills/steward/SKILL.md](skills/steward/SKILL.md) の Skill マップを正とします。
 
-共通モジュールは `scripts/` に置いています。
+共通モジュールはプラグインのルート直下の `scripts/` に置いています。
 
 | ファイル | 役割 |
 |---|---|
@@ -78,26 +79,61 @@ Tableau の Published Data Source は、実質的に組織のセマンティッ�
 | workbook の書き換え | 既定 `CreateNew` で rewired 版を作る。本番 workbook の Overwrite は承認必須 |
 | Knowledge の Business Preference | Tableau MCP の `manage-knowledge-context` で作成・更新。削除は承認必須 |
 
-draft には `…__augmented` / `…__rewired` のような接尾辞を付け、正式版と誤認されないようにします。承認ゲートの範囲や自走時の報告義務など、詳細は [CLAUDE.md](CLAUDE.md) の横断ポリシーを正とします。
+draft には `…__augmented` / `…__rewired` のような接尾辞を付け、正式版と誤認されないようにします。承認ゲートの範囲や自走時の報告義務など、詳細は [skills/steward/references/policies.md](skills/steward/references/policies.md) を正とします。
 
 ## セットアップ
 
-前提は Claude Code、Python 3、Tableau Server / Tableau Cloud のサイトです。メタデータ整備（Catalog への書き込み・説明継承）には Data Management (Catalog) の有効化が必要です。
+### 前提
 
-```sh
-pip install -r requirements.txt
-cp .env.template .env   # SERVER / SITE_NAME を実値に差し替え（.env は gitignore 済み）
+- Claude Code
+- [uv](https://docs.astral.sh/uv/)（Python 3.10 以上）。同梱スクリプトは `uv run` で実行し、依存（`tableauserverclient` / `python-dotenv` / `requests`）は各スクリプト冒頭の inline metadata から自動で入ります
+- Tableau Server / Tableau Cloud のサイト。メタデータ整備（Catalog への書き込み・説明継承）には Data Management (Catalog) の有効化が必要です
+
+### 1. プラグインを入れる
+
+このリポジトリ自体が marketplace です。Claude Code で次を実行します。
+
+```text
+/plugin marketplace add YoshitakaArakawa/tableau-datasource-steward
+/plugin install tableau-datasource-steward@tableau-datasource-steward
 ```
 
-認証は OAuth 2.0 (Authorization Code + PKCE) のブラウザサインインで、静的トークンを持ちません。`python scripts/tableau_auth.py status` で接続状態を確認できます。
+Skill は `/tableau-datasource-steward:<skill 名>` で呼べます。通常は「この project の列説明を整備して」のように依頼すれば、入口 Skill `steward` が適切な Skill にルーティングします。
 
-あとはリポジトリを Claude Code で開き、「この project の列説明を整備して」のように依頼すれば、[CLAUDE.md](CLAUDE.md) が適切な Skill にルーティングします。
+### 2. 呼び出す側のプロジェクトに `.env` を置く
 
-### Tableau MCP（読取系の一部で併用）
+接続先は、Skill を使うプロジェクトの作業ディレクトリ（またはその親）にある `.env` から読みます。[.env.template](.env.template) をコピーして `SERVER` / `SITE_NAME` を実値に差し替えてください。
 
-サンプル値の取得などで Tableau MCP を使います。MCP サーバーの接続設定は、利用者の Claude 環境側で用意してください（connector / user スコープ等）。project スコープで設定したい場合の例として、PAT/npx 版の `.mcp.json.template` を同梱しています（`.mcp.json` にコピーして実値を差し替え。`.mcp.json` は gitignore 済み）。
+`.env` はそのプロジェクトの `.gitignore` に入れます。あわせて、中間成果物の既定の置き場 `work/` も入れることを勧めます。ダウンロードした `.tdsx` / `.twbx` は接続情報を含みうるためです。
+
+```gitignore
+.env
+work/
+```
+
+中間成果物の置き場は、依頼のときに指定できます（例:「出力は `tmp/steward/` に置いて」）。指定がなければ、作業ディレクトリの `work/<yyyymmdd>_<tag>/` に置きます。
+
+### 3. サインインを確かめる
+
+認証は OAuth 2.0 (Authorization Code + PKCE) のブラウザサインインで、静的トークンを持ちません。初回の Tableau API 呼び出しでブラウザが開きます。セッションはユーザー単位のディレクトリ（Windows は `%LOCALAPPDATA%/tableau-datasource-steward`、それ以外は `~/.config/tableau-datasource-steward`）にキャッシュされ、プロジェクトやプラグインのディレクトリには書かれません。置き場所は環境変数 `STEWARD_AUTH_CACHE_DIR` で変えられます。
+
+接続状態は、Claude に「steward の準備を確認して」と頼むと `tableau_auth.py status` で確かめます。
+
+### 4. Tableau MCP（読取系の一部で併用）
+
+サンプル値の取得などで Tableau MCP を使います。MCP サーバーの接続設定は、利用者の Claude 環境側で用意してください（connector / user スコープ等）。project スコープで設定したい場合の例として、PAT/npx 版の `.mcp.json.template` を同梱しています（呼び出す側のプロジェクトに `.mcp.json` としてコピーして実値を差し替え、`.gitignore` に入れてください）。
 
 Skill 側が前提にするのは、datasource 読取ツール（`get-datasource-metadata` / `query-datasource` / `list-datasources` 等）を提供する MCP サーバーが利用可能であることだけです。Knowledge の整備には、Knowledge ツール（`inspect-knowledge-context` / `manage-knowledge-context` / `query-knowledge-context`）と Tableau+ が要ります。ツールは基底名で参照するため、サーバー名には依存しません。
+
+## 開発
+
+このリポジトリを直して試すときは、ローカルのソースをプラグインとして読み込みます。
+
+```sh
+claude --plugin-dir .
+```
+
+開発時の規約（ディレクトリ構成、Skill の書き方、検証コマンド）は [.claude/CLAUDE.md](.claude/CLAUDE.md) にあります。
 
 ## スコープと命名
 

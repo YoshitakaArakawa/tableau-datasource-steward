@@ -1,6 +1,6 @@
 # work/
 
-セッション作業物の公式置き場。**この README 以外は git で追跡しない**（`.gitignore` で除外済み）。
+このリポジトリを開発するセッションの作業物の置き場。**この README 以外は git で追跡しない**（`.gitignore` で除外済み）。プラグインとして他のプロジェクトから使うときの出力先は、入口 Skill `steward` の「出力先」に従う。
 
 ## 形式
 
@@ -27,6 +27,6 @@ work/
 
 `work/` で試して固まった内容は repo に昇格させる:
 
-- 規約・判断基準 → `CLAUDE.md` または該当 Skill の `references/`
-- 実装ロジック → 該当 Skill の `scripts/`（2 つ以上の Skill で使うなら repo 直下 `scripts/`）
+- 規約・判断基準 → 利用時に効くものは `skills/steward/` か該当 Skill の `references/`、開発時の規範は `.claude/CLAUDE.md`
+- 実装ロジック → 該当 Skill の `scripts/`（2 つ以上の Skill で使うならプラグインのルート直下 `scripts/`）
 - 未確定のものは昇格させず、ここに置いたままでよい

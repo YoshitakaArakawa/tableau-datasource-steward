@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """Source 列（REST addressable な実テーブルの列）の Catalog description を in-place 更新する。
 
 PDS フィールドの description（.tds 埋め込み。republish が必要）とは別スロット。
@@ -43,7 +51,7 @@ def _find_repo_scripts() -> Path:
         cand = cur / "scripts" / "tableau_auth.py"
         if cand.exists():
             return cand.parent
-    raise RuntimeError("repo-root scripts/ (with tableau_auth.py) not found")
+    raise RuntimeError("plugin-root scripts/ (with tableau_auth.py) not found")
 
 
 sys.path.insert(0, str(_find_repo_scripts()))

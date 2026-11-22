@@ -1,6 +1,15 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """OAuth (PKCE) authentication helper for tableau-datasource-steward skills.
 
-Loads .env from the nearest ancestor directory, runs OAuth 2.0
+Loads .env from the current working directory or its nearest ancestor
+(the caller's project, not the plugin directory), runs OAuth 2.0
 Authorization Code + PKCE flow against Tableau Cloud, injects the
 resulting access_token into a tableauserverclient Server instance,
 and yields it as a context manager.
@@ -183,9 +192,24 @@ def _probe_session(server_url: str, api_version: str, access_token: str) -> dict
         return None
 
 
-# ----- Session cache (repo-internal, gitignored) -----
+# ----- Session cache (per-user, outside any repository) -----
+CACHE_DIR_NAME = "tableau-datasource-steward"
+
+
 def _cache_path() -> Path:
-    return Path(__file__).resolve().parent.parent / ".auth-cache" / "session.json"
+    """Per-user cache file. Kept outside the plugin dir so plugin updates do not drop it,
+    and outside the caller's repository so the raw access_token is never committed.
+
+    Override the directory with STEWARD_AUTH_CACHE_DIR.
+    """
+    override = os.environ.get("STEWARD_AUTH_CACHE_DIR")
+    if override:
+        base = Path(override).expanduser()
+    elif os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / CACHE_DIR_NAME
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / CACHE_DIR_NAME
+    return base / "session.json"
 
 
 def _load_cached_session(server_url: str, site_name: str, api_version: str) -> dict | None:
@@ -313,9 +337,9 @@ def _fetch_user_id(server_url: str, api_version: str, access_token: str) -> str:
 def signed_in_server():
     """Yield a TSC.Server bound to a Tableau Cloud access_token.
 
-    Reuses a cached token from <repo>/.auth-cache/session.json when one is alive;
+    Reuses a cached token from the per-user cache (see _cache_path) when one is alive;
     otherwise runs OAuth (PKCE) browser sign-in and caches the result. Does NOT
-    sign out on exit — call `python scripts/tableau_auth.py logout` to invalidate.
+    sign out on exit — run this script with `logout` to invalidate.
     """
     creds = load_credentials()
     server_url = creds["server_url"]
@@ -415,7 +439,7 @@ def _cli_status() -> int:
 
 def _main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] not in ("logout", "status"):
-        print("usage: python scripts/tableau_auth.py {logout|status}", file=sys.stderr)
+        print("usage: tableau_auth.py {logout|status}", file=sys.stderr)
         return 2
     if argv[1] == "logout":
         return _cli_logout()

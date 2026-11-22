@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "tableauserverclient>=0.40",
+#     "python-dotenv>=1.0",
+#     "requests>=2.31",
+# ]
+# ///
 """Tableau Metadata API (GraphQL) client.
 
 Tableau MCP は Metadata API をほぼ非対応のため、lineage 系（下流 workbook 列挙・
