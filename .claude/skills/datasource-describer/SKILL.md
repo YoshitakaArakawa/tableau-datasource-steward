@@ -136,7 +136,7 @@ inspector が拾った**既存の** desc・grain が、現在のデータに対�
 }
 ```
 
-`bp_candidates[]` の各要素は Business Preference 台帳の item と同じ形（`kind` / `name` / `statement` / `translation` / `rationale`）に揃え、出所を `origin` に残す。`name` は台帳の照合キーなので、1つのデータソースに限った判断なら末尾に `(<データソース名>)` を付け、複数の PDS から同じ名前の候補を出さない。`statement` は英語で書き、データソース名・フィールド名は正確な名前をバッククォートで囲む。書式の正典は Knowledge 整備側の bp-format にある。
+`bp_candidates[]` の各要素は Business Preference 台帳の item と同じ形（`kind` / `name` / `statement` / `translation` / `rationale`）に揃え、出所を `origin` に残す。`name` は台帳の照合キーなので、1つのデータソースに限った判断なら末尾に必ず `(<データソース名>)` を付ける。`statement` は英語で書き、データソース名・フィールド名は正確な名前をバッククォートで囲む。書式の正典は Knowledge 整備側の bp-format にある。
 
 `stale` / `off_format` / `misplaced` の `revised_text` は `descriptions[]`（grain なら `datasource.description`）にも載せ、augmenter がそれを注入する。`audits[]` / `skipped[]` / `bp_candidates[]` / `structure_findings[]` と provenance フィールド（`source` / `conflict` / `variants` / `previous_text` / `moved_to`）は **orchestrator がユーザー報告で「抽出 / 推論」「衝突」「stale の原文」を区別するための注記**。augmenter は自身が定義したキーしか読まないため、これらの注記は change-set にそのまま残してよい（キーの正典は augmenter の references/change-set-format.md）。
 

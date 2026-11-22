@@ -10,7 +10,7 @@ Tableau Knowledge の Business Preference（どう使うか）の整備と参照
 | Skill | 系統 | 責務 |
 |---|---|---|
 | `datasource-inspector` | READ | PDS のスキーマ・メタデータ・既存 calc・既定の集計を GraphQL で棚卸しし、整備 gap を洗い出す（既存 desc 全文・grain・擬似列除外・skip 候補付き） |
-| `datasource-describer` | ANALYZE | 列・calc・datasource（grain）の説明草案を作り、既存 desc・grain が現データに適切かも検証（valid/stale）。出所付きで change-set 化 |
+| `datasource-describer` | ANALYZE | 列・calc・datasource（grain）の説明草案を作り、既存 desc・grain が現データに適切かも検証（valid / stale / off_format / misplaced）。使い方の文は BP 候補、集計は構造の指摘に振り分ける。出所付きで change-set 化 |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc を検出し hoist 候補（+ WB 側 desc・コメント込み formula）を出す |
 | `datasource-augmenter` | WRITE | change-set を受けて PDS メタデータを書き込む。source 列 desc は Catalog in-place、field desc / grain は desc-only Overwrite（ゲート付き）、calc は CreateNew publish。いずれも機械検証まで |
 | `workbook-rewirer` | WRITE | hoist 後の workbook を書き換え（PDS 付け替え + calc 参照差し替え）→ publish → view 描画検証 |

@@ -235,35 +235,68 @@ def strip_quoted(text: str) -> str:
     return DOUBLE_QUOTED.sub(" ", BACKTICK.sub(" ", PLACEHOLDER.sub(" ", text)))
 
 
-def find_unquoted(text: str, names: set[str]) -> list[str]:
-    """引用されていない地の文に、実在する名前がそのまま出ていないか。"""
+def find_unquoted(text: str, names: set[str], one_word_needs_in: bool = False) -> list[str]:
+    """引用されていない地の文に、実在する名前がそのまま出ていないか。
+
+    one_word_needs_in: 1語の名前（Customer・Date 等）は英語の地の文と区別できないので、
+    参照の形（`<名前> in <何か>`）か、日本語等に接しているときだけ拾う。
+    """
     plain = strip_quoted(text)
     hits = []
     for n in sorted(names, key=len, reverse=True):
         if len(n) < MIN_UNQUOTED_LEN:
             continue
-        if re.search(WORD_EDGE_L + re.escape(n) + WORD_EDGE_R, plain):
+        name = re.escape(n)
+        pattern = WORD_EDGE_L + name + WORD_EDGE_R
+        if one_word_needs_in and not re.search(r"\s", n):
+            # 英語の地の文と区別できる形だけ拾う: `<名前> in <何か>`、または日本語等の
+            # 非 ASCII 文字に接している（空白で区切らない言語に埋まった名前）
+            pattern = (WORD_EDGE_L + name + r"\s+in\s+\S"
+                       + "|" + r"(?<=[^\x00-\x7F])" + name + WORD_EDGE_R
+                       + "|" + WORD_EDGE_L + name + r"(?=[^\x00-\x7F])")
+        if re.search(pattern, plain):
             hits.append(n)
             plain = plain.replace(n, " ")  # 長い名前に含まれる短い名前を二重計上しない
     return hits
 
 
-def vanished_names(previous: dict | None, catalog: dict) -> tuple[set[str], set[str]]:
-    """前回のカタログにあって今回のカタログに無いデータソース名・フィールド名。
+def vanished(name: str, previous: dict | None, catalog: dict, fetcher) -> dict | None:
+    """前回のカタログにあって今は無い名前か。text_mode の単独の引用だけに使う。
 
-    フィールドは、今回もフィールドを読めた同名 PDS についてだけ比べる（未取得は判定しない）。
+    - データソース: 前回あった名前が、今のカタログに無い。
+    - フィールド: 前回その名前を持っていた PDS を、今のカタログで同名の PDS と比べる
+      （必要な PDS だけフィールドを読む）。前回の PDS のどれかに今も残っていれば消えていない。
+    戻り値は finding（消えていなければ None）。
     """
     if not previous:
-        return set(), set()
-    now_ds = {d["name"]: d for d in catalog["datasources"]}
-    gone_ds, gone_fields = set(), set()
-    for d in previous.get("datasources", []):
-        cur = now_ds.get(d["name"])
+        return None
+    now = {d["name"]: d for d in catalog["datasources"]}
+    prev = previous.get("datasources", [])
+    if any(d["name"] == name for d in prev) and name not in now:
+        return {"status": "missing_datasource", "ref": name,
+                "hint": "前回のカタログにはあった（改名・削除）"}
+    gone_from, unknown = [], False
+    for d in prev:
+        if name not in field_names(d.get("fields")):
+            continue
+        cur = now.get(d["name"])
         if cur is None:
-            gone_ds.add(d["name"])
-        elif d.get("fields") is not None and cur.get("fields") is not None:
-            gone_fields |= field_names(d["fields"]) - field_names(cur["fields"])
-    return gone_ds, gone_fields
+            gone_from.append(d["name"])
+            continue
+        fields = ensure_fields(cur, fetcher)
+        if fields is None:
+            unknown = True
+        elif name in field_names(fields):
+            return None  # まだ実在する PDS がある
+        else:
+            gone_from.append(d["name"])
+    if unknown:
+        return {"status": "unknown_fields", "ref": name,
+                "hint": "前回のカタログにはあった。今のフィールドが未取得で判定できない"}
+    if gone_from:
+        return {"status": "missing_field", "ref": name, "gone_from": sorted(set(gone_from)),
+                "hint": "前回のカタログにはあった（改名・削除）"}
+    return None
 
 
 def check_text(text: str, catalog: dict, fetcher, text_mode: bool,
@@ -289,9 +322,11 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool,
             if text_mode and r["kind"] == "name":
                 continue  # Markdown のパス表記（work/<date>/ 等）
             glob = ANGLE_PLACEHOLDER.sub("*", ds_name)
-            findings.append({"status": "placeholder_in_name", "ref": ds_name,
-                             "hint": f"可変部は * の glob で書く（`{glob}`）",
-                             "glob_matches": len(match_datasources(catalog, glob))})
+            n = len(match_datasources(catalog, glob))
+            # 一致が 0 件なら、glob に直しても参照切れ。ゲートで止める
+            findings.append({"status": "placeholder_in_name" if n else "placeholder_unmatched",
+                             "ref": ds_name, "hint": f"可変部は * の glob で書く（`{glob}`）",
+                             "glob_matches": n})
             continue
         matched = match_datasources(catalog, ds_name)
         if r["kind"] == "name" and not matched and not is_glob(ds_name):
@@ -336,7 +371,6 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool,
             findings.append({"status": "ok", "ref": ref, "datasources": [d["name"] for d in hits]})
 
     # 2) データソースでなかった単独の名前 = 未修飾の field
-    gone_ds, gone_fields = vanished_names(previous, catalog)
     for r in pending_fields:
         known = [d for d in ds_in_scope if ensure_fields(d, fetcher) is not None]
         hits = [d for d in known if r["name"] in field_names(d["fields"])]
@@ -352,12 +386,9 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool,
             findings.append(f)
         elif text_mode:
             # 名前ではない引用（コマンド・パス等）と区別できるのは、前回は実在した名前だけ
-            if r["name"] in gone_ds:
-                findings.append({"status": "missing_datasource", "ref": r["name"],
-                                 "hint": "前回のカタログにはあった（改名・削除）"})
-            elif r["name"] in gone_fields:
-                findings.append({"status": "missing_field", "ref": r["name"],
-                                 "hint": "前回のカタログにはあった（改名・削除）"})
+            gone = vanished(r["name"], previous, catalog, fetcher)
+            if gone:
+                findings.append(gone)
         elif not ds_in_scope:
             findings.append({"status": "unresolved", "ref": r["name"],
                              "hint": "データソースでもなく、同じ文にデータソースの参照も無い"})
@@ -376,7 +407,7 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool,
     scope_fields: set[str] = set()
     for d in uniq:
         scope_fields |= field_names(ensure_fields(d, fetcher))
-    for n in find_unquoted(text, scope_fields):
+    for n in find_unquoted(text, scope_fields, one_word_needs_in=True):
         findings.append({"status": "unquoted_field", "ref": n})
         resolved.extend((n, d) for d in uniq if n in field_names(d.get("fields")))
 
@@ -398,6 +429,7 @@ SEVERITY = {"missing_datasource": "error", "missing_field": "error", "unresolved
             "unknown_fields": "unknown",
             "ambiguous_field": "warning", "partial_field": "warning", "unqualified_field": "warning",
             "duplicate_datasource_name": "warning", "placeholder_in_name": "warning",
+            "placeholder_unmatched": "error",
             "unquoted_datasource": "warning", "unquoted_field": "warning", "ok": "ok"}
 
 
@@ -493,21 +525,31 @@ def load_snapshots(paths: list[str]) -> list[dict]:
             else:
                 single = c.get("statement") or c.get("text")
                 statements = [single] if single else []
-            if not c.get("name") or not statements:
-                raise SystemExit(f"snapshot context lacks name/statements: {cid}")
             node = c.get("node_id") or c.get("targetNodeId") or c.get("nodeId")
+            for key in ("node", "target", "targetNode"):  # ネストした形 {node: {id}}
+                if not node and isinstance(c.get(key), dict):
+                    node = c[key].get("id") or c[key].get("nodeId")
             is_global = c.get("is_global", c.get("isGlobal"))
+            if is_global is False and not node:
+                # 黙って global に倒すと、scope の誤った update を出しうる
+                raise SystemExit(f"snapshot context {cid}: isGlobal=false だが node id が読めない。"
+                                 "出力の形を確かめてスクリプトを直す")
             scope = ["global", None] if is_global or not node else ["node", node]
             out[cid] = {"context_id": cid, "name": c.get("name"), "statements": statements,
-                        "scope": scope}
+                        "scope": scope,
+                        # 名前か文面が空の context は同期の対象にしない（全体は止めない）
+                        "invalid": not c.get("name") or not statements}
     return list(out.values())
 
 
 def cmd_init(args) -> None:
     if Path(args.ledger).exists():
         raise SystemExit(f"ledger already exists: {args.ledger}（上書きしない）")
-    items = []
+    items, skipped = [], []
     for c in load_snapshots(args.snapshot):
+        if c["invalid"]:
+            skipped.append(c["context_id"])
+            continue
         m = KIND_PREFIX.match(c["name"] or "")
         it = {"kind": m.group(1) if m else None, "name": c["name"],
               "statements": c["statements"], "translation": None, "rationale": None}
@@ -516,7 +558,8 @@ def cmd_init(args) -> None:
                    "synced_name": c["name"], "synced_scope": c["scope"]})
         items.append(it)
     save_json(args.ledger, {"graph_id": args.graph_id, "items": items})
-    print("RESULT_JSON:", json.dumps({"items": len(items)}, ensure_ascii=False))
+    print("RESULT_JSON:", json.dumps({"items": len(items), "skipped_invalid": skipped},
+                                     ensure_ascii=False))
 
 
 # --- 同期計画 ---------------------------------------------------------------------
@@ -577,7 +620,8 @@ def cmd_plan(args) -> None:
     by_id = {c["context_id"]: c for c in snap}
     by_name: dict[str, list[dict]] = {}
     for c in snap:
-        by_name.setdefault(c["name"], []).append(c)
+        if not c["invalid"]:
+            by_name.setdefault(c["name"], []).append(c)
 
     actions, linked = [], set()
     # context_id で紐づいている context は、名前による紐づけの候補から外す（別項目に奪わせない）
@@ -616,6 +660,10 @@ def cmd_plan(args) -> None:
                 continue
             k = cands[0]
         linked.add(k["context_id"])
+        if k["invalid"]:
+            actions.append({"action": "invalid", "name": name, "context_id": k["context_id"],
+                            "reason": "Knowledge 側の context の名前か文面が空。Knowledge で確かめる"})
+            continue
 
         dims = {
             "statements": three_way(item_statements(it), k["statements"], _synced_statements(it),
@@ -673,7 +721,10 @@ def cmd_plan(args) -> None:
                 it["synced_scope"] = k["scope"]
 
     for c in snap:
-        if c["context_id"] not in linked:
+        if c["context_id"] not in linked and c["invalid"]:
+            actions.append({"action": "invalid", "name": c["name"], "context_id": c["context_id"],
+                            "reason": "Knowledge 側の context の名前か文面が空。同期の対象にしない"})
+        elif c["context_id"] not in linked:
             actions.append({"action": "orphan", "name": c["name"], "context_id": c["context_id"],
                             "statements": c["statements"],
                             "reason": "台帳に無い。台帳に取り込むか、削除（要承認）するかを確認する"})

@@ -45,8 +45,8 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
   - `update`: `manage-knowledge-context`（`action: update`, `contextId`）。`fields` に応じて `statements` / `name`（`new_name` の値）/ `isGlobal` か `targetNodeId` を渡す
   - `pull`: 書き込まない。Knowledge 側の編集（`fields`）を台帳に取り込む（write-back で反映）
   - `blocked`: 書き込まない。点検の error / unknown を直してから次回に回す
-  - `conflict` / `recreate` / `orphan`: 書き込まない。報告で判断を仰ぐ。`orphan` の削除は承認後だけ
-- [ ] 書き込みの後にもう一度 `list` して `knowledge_snapshot_after.json` に保存し、`plan --snapshot <after> --write-back` で台帳に `context_id` と同期済みの値（`synced_*`）を記録する。このとき create / update した項目が `unchanged` になっていることを確かめる
+  - `conflict` / `recreate` / `orphan` / `invalid`: 書き込まない。報告で判断を仰ぐ。`orphan` の削除は承認後だけ。`invalid` は Knowledge 側の名前か文面が空の context
+- [ ] 書き込みの後にもう一度 `list` して `knowledge_snapshot_after.json` に保存し、`plan --ledger <台帳> --snapshot <after> --check <check.json> --out <plan_after.json> --write-back` で台帳に `context_id` と同期済みの値（`synced_*`）を記録する。このとき create / update した項目が `unchanged` になっていることを確かめる。`pull` で文面を取り込んだ項目は、次回の `plan` の前に `check` をやり直す（文面が変わったので、やり直すまで `blocked` になる）
 - [ ] 台帳の変更は利用者のリポジトリ側の差分として残す（commit は利用者が判断する）
 
 ## モード3: 点検する（読取専用）
