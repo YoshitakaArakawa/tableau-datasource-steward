@@ -37,7 +37,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 進捗:
 - [ ] `inspect-knowledge-context`（`action: status`）で対象グラフの id を確かめ、台帳の `graph_id` と一致することを確認する。以降の `inspect-knowledge-context` / `manage-knowledge-context` の呼び出しには、すべて `graphId` にこの id を渡す。`graphId` を省くと primary グラフが読み書きされるため、primary を使うときも id を明示する。`plan` は `graph_id` の無い台帳を拒否する
 - [ ] `inspect-knowledge-context`（`action: list`, `limit: 100`）で全 statement を読み、応答の JSON をそのまま `work/<yyyymmdd>_<tag>/knowledge_snapshot_before.json` に保存する（既存ファイルを上書きしない）。応答は statement 1 件が 1 行で、`plan` が `contextId` ごとにまとめる。`resultInfo.truncated` が true なら同期しない（`plan` も拒否する。100 件を超えるグラフは現状扱えない）
-- [ ] モード3の `check` を台帳に対して回し、`check.json` を作る
+- [ ] モード3の `check` を台帳に対して、同期の直前にオンラインで回し、`check.json` を作る（`plan` は、カタログを読んでから 24 時間を超えた点検結果では書き込まない）
 - [ ] `knowledge_ledger.py plan --ledger <台帳> --snapshot <before> [--snapshot ...] --check <check.json> --out <plan.json>` で計画を作る
 - [ ] 計画の action ごとに処理する:
   - `create`: `manage-knowledge-context`（`action: create`, `name`, `statements: [{statement}, ...]`, `isGlobal: true`）

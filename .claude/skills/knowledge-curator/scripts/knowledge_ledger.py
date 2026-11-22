@@ -26,6 +26,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Windows コンソール (cp932) の文字化け対策
@@ -50,6 +51,8 @@ PAGE_SIZE = 100
 # 埋まった名前（売上はRevenueを使う）は拾う
 WORD_EDGE_L = r"(?<![A-Za-z0-9_])"
 WORD_EDGE_R = r"(?![A-Za-z0-9_])"
+# plan が受け入れる点検結果の古さの既定（カタログを読んでからの時間）
+DEFAULT_MAX_CHECK_AGE_HOURS = 24
 # name の kind 接頭辞（"Term: ..."）
 KIND_PREFIX = re.compile(r"^(Usage|Term|Method|Cross-source metric):\s")
 
@@ -181,7 +184,7 @@ def fetch_catalog(server, graphql) -> dict:
         out.extend({"name": n["name"], "luid": n["luid"], "project": n.get("projectName"),
                     "fields": None} for n in conn["nodes"])
         if not conn["pageInfo"]["hasNextPage"]:
-            return {"datasources": out}
+            return {"datasources": out, "fetched_at": now_utc()}
         after = conn["pageInfo"]["endCursor"]
 
 
@@ -376,6 +379,10 @@ def cmd_check(args) -> None:
         run_check(args, fetch_catalog(server, graphql), make_fetcher(server, graphql))
 
 
+def now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def run_check(args, catalog: dict, fetcher) -> None:
     items = [{"source": "ledger", "name": item_name(it),
               "text": "\n".join(item_statements(it)),
@@ -390,7 +397,11 @@ def run_check(args, catalog: dict, fetcher) -> None:
         results.append({"source": it["source"], "name": it["name"],
                         "statements_hash": it["statements_hash"], **r})
 
-    save_json(args.out, {"totals": totals, "items": results})
+    # 照合に使ったカタログを読んだ時刻。plan の鮮度ゲートが使う。保存済みカタログに
+    # 時刻が無ければ null（plan はその点検結果で書き込まない）
+    save_json(args.out, {"checked_at": now_utc(), "catalog_fetched_at": catalog.get("fetched_at"),
+                         "catalog_mode": "offline" if fetcher is None else "online",
+                         "totals": totals, "items": results})
     if args.save_catalog:
         # fields=null はこの回に読まなかった PDS。オフライン再実行では unknown_fields になる
         save_json(args.save_catalog, catalog)
@@ -488,15 +499,41 @@ def _synced_statements(it: dict):
     return None
 
 
-def gate_reasons(check_path: str, ledger: dict) -> dict[str, list[str]]:
+def stale_reason(data: dict, max_age_hours: float) -> str | None:
+    """点検に使ったカタログが古ければ理由を返す（全項目を止める）。
+
+    点検の後にデータソースやフィールドが改名・削除されても、古い点検結果では検出できない。
+    """
+    fetched = data.get("catalog_fetched_at")
+    if not fetched:
+        return "点検結果にカタログの取得時刻が無い。オンラインで check をやり直す"
+    try:
+        at = datetime.fromisoformat(fetched)
+    except ValueError:
+        return f"カタログの取得時刻が読めない（{fetched}）。オンラインで check をやり直す"
+    if at.tzinfo is None:
+        return f"カタログの取得時刻にタイムゾーンが無い（{fetched}）。オンラインで check をやり直す"
+    age = datetime.now(timezone.utc) - at
+    if age > timedelta(hours=max_age_hours):
+        return (f"点検に使ったカタログが古い（{fetched}、{age.total_seconds() / 3600:.1f} 時間前。"
+                f"上限 {max_age_hours:g} 時間）。オンラインで check をやり直す")
+    return None
+
+
+def gate_reasons(check_path: str, ledger: dict,
+                 max_age_hours: float = DEFAULT_MAX_CHECK_AGE_HOURS) -> dict[str, list[str]]:
     """create / update してはいけない台帳項目と理由（機械ゲート）。
 
     次のどれかに当たる項目を止める:
+    - 点検に使ったカタログが古い、または取得時刻が分からない（全項目）
     - 点検で error / unknown が出た
     - 点検結果に無い（点検の後に足した・改名した）
     - 点検した文面と、いまの台帳の文面が違う（点検の後に直した）
     """
     data = json.loads(Path(check_path).read_text(encoding="utf-8"))
+    stale = stale_reason(data, max_age_hours)
+    if stale:
+        return {item_name(it): [stale] for it in ledger["items"]}
     checked = {it["name"]: it for it in data.get("items", []) if it.get("source") == "ledger"}
     out = {}
     for it in ledger["items"]:
@@ -521,7 +558,7 @@ def cmd_plan(args) -> None:
         # graphId を省くと MCP は primary グラフを読み書きする。台帳と別のグラフに書かないよう止める
         raise SystemExit("ledger has no graph_id。inspect-knowledge-context status で対象グラフの id を確かめて台帳に書く")
     snap = load_snapshots(args.snapshot)
-    blocked = gate_reasons(args.check, ledger)
+    blocked = gate_reasons(args.check, ledger, args.max_check_age_hours)
     by_id = {c["context_id"]: c for c in snap}
     by_name: dict[str, list[dict]] = {}
     for c in snap:
@@ -676,6 +713,8 @@ def main():
     p.add_argument("--snapshot", action="append", required=True, help="複数可（分けて読んだ list）")
     p.add_argument("--check", required=True,
                    help="台帳に対する check の結果（機械ゲート）。error / unknown・未点検・点検後の変更がある項目を blocked にする")
+    p.add_argument("--max-check-age-hours", type=float, default=DEFAULT_MAX_CHECK_AGE_HOURS,
+                   help="点検に使ったカタログの古さの上限（時間）。超えたら全項目を blocked にする")
     p.add_argument("--out", required=True)
     p.add_argument("--write-back", action="store_true",
                    help="contextId と同期済みの値（synced_*）、pull の取り込みを台帳に保存する")
