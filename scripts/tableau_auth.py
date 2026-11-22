@@ -262,11 +262,12 @@ def _save_session(server_url: str, site_name: str, access_token: str) -> None:
         "site_name": site_name,
         "access_token": access_token,
     }
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
+    # Create with 0o600 up front so the token is never readable by others, even briefly.
+    # Remove any leftover tmp first: the mode argument only applies when the file is created.
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, indent=2))
     os.replace(tmp, path)
     print(f"[auth] cached session at {path}", file=sys.stderr)
 
@@ -305,6 +306,7 @@ def _run_oauth_flow(server_url: str, site_name: str, port: int) -> str:
     print(f"[auth] waiting for callback (up to {OAUTH_TIMEOUT_SECONDS}s)...", file=sys.stderr)
     received = result.event.wait(timeout=OAUTH_TIMEOUT_SECONDS)
     httpd.shutdown()
+    httpd.server_close()
     if not received:
         raise SystemExit("[auth] ERROR: timeout waiting for OAuth callback")
     if result.error or not result.code:
