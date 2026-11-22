@@ -14,7 +14,7 @@ usage:
     python knowledge_ledger.py refs  --ledger bp.json [--write-back]
     python knowledge_ledger.py check --ledger bp.json --out check.json
                                      [--catalog catalog.json | --save-catalog catalog.json]
-                                     [--text-file skill.md ...]
+                                     [--previous-catalog old_catalog.json] [--text-file skill.md ...]
     python knowledge_ledger.py plan  --ledger bp.json --snapshot knowledge.json [--snapshot more.json]
                                      --check check.json --out plan.json [--write-back]
 """
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import re
 import sys
@@ -121,15 +122,24 @@ def save_json(path: str, data: dict) -> None:
 
 # --- 参照の抽出 ------------------------------------------------------------------
 def extract_refs(text: str) -> list[dict]:
-    """バッククォートの名前を抜く。`X` in `Y` は field X in datasource Y。"""
-    text = PLACEHOLDER.sub("", text)
+    """バッククォートの名前を抜く。`X` in `Y` は field X in datasource Y。
+
+    {{NAME}} を含む名前はセットアップ時に置換される前提で照合しない（文字列は消さず、
+    その名前だけを外す。消すと前後のバッククォートが組み変わって誤検出になる）。
+    """
     refs, consumed = [], set()
     for m in FIELD_IN_DS.finditer(text):
-        refs.append({"kind": "field", "field": m.group(1), "datasource": m.group(2)})
         consumed.add(m.start(1))
         consumed.add(m.start(2))
+        field, ds = m.group(1), m.group(2)
+        if PLACEHOLDER.search(ds):
+            continue  # データソースが決まらないのでフィールドも照合できない
+        if PLACEHOLDER.search(field):
+            refs.append({"kind": "name", "name": ds})
+            continue
+        refs.append({"kind": "field", "field": field, "datasource": ds})
     for m in BACKTICK.finditer(text):
-        if m.start(1) in consumed:
+        if m.start(1) in consumed or PLACEHOLDER.search(m.group(1)):
             continue
         refs.append({"kind": "name", "name": m.group(1)})  # datasource か未修飾の field
     return refs
@@ -238,7 +248,26 @@ def find_unquoted(text: str, names: set[str]) -> list[str]:
     return hits
 
 
-def check_text(text: str, catalog: dict, fetcher, text_mode: bool) -> dict:
+def vanished_names(previous: dict | None, catalog: dict) -> tuple[set[str], set[str]]:
+    """前回のカタログにあって今回のカタログに無いデータソース名・フィールド名。
+
+    フィールドは、今回もフィールドを読めた同名 PDS についてだけ比べる（未取得は判定しない）。
+    """
+    if not previous:
+        return set(), set()
+    now_ds = {d["name"]: d for d in catalog["datasources"]}
+    gone_ds, gone_fields = set(), set()
+    for d in previous.get("datasources", []):
+        cur = now_ds.get(d["name"])
+        if cur is None:
+            gone_ds.add(d["name"])
+        elif d.get("fields") is not None and cur.get("fields") is not None:
+            gone_fields |= field_names(d["fields"]) - field_names(cur["fields"])
+    return gone_ds, gone_fields
+
+
+def check_text(text: str, catalog: dict, fetcher, text_mode: bool,
+               previous: dict | None = None) -> dict:
     """1 件分の照合。text_mode はスキル等の Markdown 用で、名前らしくない引用を無視する。
 
     text_mode では fenced code と二重バッククォートの例示を除き、単独のバッククォートは「実在する名前・glob」に
@@ -269,7 +298,10 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool) -> dict:
             pending_fields.append(r)  # データソースでなければ未修飾 field の候補
             continue
         if not matched:
-            if text_mode and r["kind"] == "name":
+            # text_mode の glob は、前回のカタログで一致していたときだけ名前とみなす
+            # （`*.md` のようなファイル glob を参照切れにしない）
+            if text_mode and r["kind"] == "name" and not (
+                    is_glob(ds_name) and previous and match_datasources(previous, ds_name)):
                 continue
             findings.append({"status": "missing_datasource", "ref": ds_name,
                              **({"hint": "glob に一致するデータソースが無い"} if is_glob(ds_name) else {})})
@@ -296,10 +328,15 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool) -> dict:
         sib = sorted({s for d in hits for s in siblings(r["field"], field_names(d["fields"]))})
         if sib:
             findings.append({"status": "ambiguous_field", "ref": ref, "siblings": sib})
+        elif is_glob(ds_name) and len(hits) < len(known):
+            findings.append({"status": "partial_field", "ref": ref,
+                             "datasources": [d["name"] for d in hits],
+                             "missing_in": sorted(d["name"] for d in known if d not in hits)})
         else:
             findings.append({"status": "ok", "ref": ref, "datasources": [d["name"] for d in hits]})
 
     # 2) データソースでなかった単独の名前 = 未修飾の field
+    gone_ds, gone_fields = vanished_names(previous, catalog)
     for r in pending_fields:
         known = [d for d in ds_in_scope if ensure_fields(d, fetcher) is not None]
         hits = [d for d in known if r["name"] in field_names(d["fields"])]
@@ -314,7 +351,13 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool) -> dict:
                 f["hint"] += "。同名の列があるので、どちらかを正確な名前で書く"
             findings.append(f)
         elif text_mode:
-            continue  # 名前ではない引用（コマンド・パス・オプション等）
+            # 名前ではない引用（コマンド・パス等）と区別できるのは、前回は実在した名前だけ
+            if r["name"] in gone_ds:
+                findings.append({"status": "missing_datasource", "ref": r["name"],
+                                 "hint": "前回のカタログにはあった（改名・削除）"})
+            elif r["name"] in gone_fields:
+                findings.append({"status": "missing_field", "ref": r["name"],
+                                 "hint": "前回のカタログにはあった（改名・削除）"})
         elif not ds_in_scope:
             findings.append({"status": "unresolved", "ref": r["name"],
                              "hint": "データソースでもなく、同じ文にデータソースの参照も無い"})
@@ -353,9 +396,15 @@ def check_text(text: str, catalog: dict, fetcher, text_mode: bool) -> dict:
 
 SEVERITY = {"missing_datasource": "error", "missing_field": "error", "unresolved": "error",
             "unknown_fields": "unknown",
-            "ambiguous_field": "warning", "unqualified_field": "warning",
+            "ambiguous_field": "warning", "partial_field": "warning", "unqualified_field": "warning",
             "duplicate_datasource_name": "warning", "placeholder_in_name": "warning",
             "unquoted_datasource": "warning", "unquoted_field": "warning", "ok": "ok"}
+
+
+def statements_hash(statements: list[str]) -> str:
+    """check と plan が同じ版の文面を見ているかの照合用。空白の揺れは無視する。"""
+    norm = "\n".join(re.sub(r"\s+", " ", x).strip() for x in statements)
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
 
 
 def cmd_check(args) -> None:
@@ -373,20 +422,26 @@ def run_check(args, catalog: dict, fetcher) -> None:
     if args.ledger:
         for it in load_ledger(args.ledger)["items"]:
             items.append({"source": "ledger", "name": item_name(it),
-                          "text": "\n".join(item_statements(it)), "text_mode": False})
+                          "text": "\n".join(item_statements(it)), "text_mode": False,
+                          "statements_hash": statements_hash(item_statements(it))})
     for tf in args.text_file or []:
         items.append({"source": "text_file", "name": Path(tf).name,
                       "text": Path(tf).read_text(encoding="utf-8"), "text_mode": True})
     if not items:
         raise SystemExit("nothing to check: pass --ledger and/or --text-file")
 
+    previous = (json.loads(Path(args.previous_catalog).read_text(encoding="utf-8"))
+                if args.previous_catalog else None)
     results, totals = [], {"error": 0, "unknown": 0, "warning": 0, "ok": 0}
     for it in items:
-        r = check_text(it["text"], catalog, fetcher, it["text_mode"])
+        r = check_text(it["text"], catalog, fetcher, it["text_mode"], previous)
         for f in r["findings"]:
             f["severity"] = SEVERITY[f["status"]]
             totals[f["severity"]] += 1
-        results.append({"source": it["source"], "name": it["name"], **r})
+        row = {"source": it["source"], "name": it["name"], **r}
+        if "statements_hash" in it:
+            row["statements_hash"] = it["statements_hash"]
+        results.append(row)
 
     save_json(args.out, {"totals": totals, "items": results})
     if args.save_catalog:
@@ -396,16 +451,29 @@ def run_check(args, catalog: dict, fetcher) -> None:
 
 
 # --- スナップショット -------------------------------------------------------------------
-def _as_context_list(raw) -> list:
+def _as_context_list(raw, path: str) -> list:
     if isinstance(raw, dict):
-        if any(k in raw for k in ("contextId", "context_id", "id")):
-            return [raw]  # 単一 context
-        for key in ("contexts", "items", "data", "results"):
+        info = raw.get("resultInfo") or {}
+        if info.get("truncated"):
+            # 欠けたスナップショットで計画すると、見えない context を create して重複させる
+            raise SystemExit(f"snapshot is truncated: {path}。nodeId / isGlobal で分けて全件読み直す")
+        for key in ("contexts", "items", "data", "results"):  # 包みを先に見る
             if isinstance(raw.get(key), list):
                 return raw[key]
+        if any(k in raw for k in ("contextId", "context_id", "id")):
+            return [raw]  # 単一 context
     if isinstance(raw, list):
         return raw
     raise SystemExit("snapshot: expected a context, a list of contexts, or a dict wrapping one")
+
+
+def _statement_text(s) -> str:
+    if isinstance(s, dict):
+        for key in ("statement", "text", "value", "content"):
+            if isinstance(s.get(key), str):
+                return s[key]
+        raise SystemExit(f"snapshot statement has no text: {json.dumps(s, ensure_ascii=False)[:200]}")
+    return str(s)
 
 
 def load_snapshots(paths: list[str]) -> list[dict]:
@@ -415,16 +483,18 @@ def load_snapshots(paths: list[str]) -> list[dict]:
     """
     out: dict[str, dict] = {}
     for path in paths:
-        for c in _as_context_list(json.loads(Path(path).read_text(encoding="utf-8"))):
+        for c in _as_context_list(json.loads(Path(path).read_text(encoding="utf-8")), path):
             cid = c.get("context_id") or c.get("contextId") or c.get("id")
             if not cid:
                 raise SystemExit(f"snapshot entry lacks context id: {json.dumps(c, ensure_ascii=False)[:200]}")
             sts = c.get("statements")
             if isinstance(sts, list):
-                statements = [s["statement"] if isinstance(s, dict) else str(s) for s in sts]
+                statements = [_statement_text(s) for s in sts]
             else:
                 single = c.get("statement") or c.get("text")
                 statements = [single] if single else []
+            if not c.get("name") or not statements:
+                raise SystemExit(f"snapshot context lacks name/statements: {cid}")
             node = c.get("node_id") or c.get("targetNodeId") or c.get("nodeId")
             is_global = c.get("is_global", c.get("isGlobal"))
             scope = ["global", None] if is_global or not node else ["node", node]
@@ -473,37 +543,52 @@ def _synced_statements(it: dict):
     return None
 
 
-def blocked_names(check_path: str | None) -> dict[str, list[str]]:
-    """点検で error / unknown が出た台帳項目。これらは create / update しない（機械ゲート）。"""
-    if not check_path:
-        return {}
+def gate_reasons(check_path: str, ledger: dict) -> dict[str, list[str]]:
+    """create / update してはいけない台帳項目と理由（機械ゲート）。
+
+    次のどれかに当たる項目を止める:
+    - 点検で error / unknown が出た
+    - 点検結果に無い（点検の後に足した・改名した）
+    - 点検した文面と、いまの台帳の文面が違う（点検の後に直した）
+    """
     data = json.loads(Path(check_path).read_text(encoding="utf-8"))
+    checked = {it["name"]: it for it in data.get("items", []) if it.get("source") == "ledger"}
     out = {}
-    for it in data.get("items", []):
-        if it.get("source") != "ledger":
+    for it in ledger["items"]:
+        name = item_name(it)
+        c = checked.get(name)
+        if c is None:
+            out[name] = ["点検結果に無い。台帳に対して check をやり直す"]
             continue
-        bad = [f"{f['status']}: {f['ref']}" for f in it["findings"]
+        if c.get("statements_hash") != statements_hash(item_statements(it)):
+            out[name] = ["点検の後に文面が変わった。check をやり直す"]
+            continue
+        bad = [f"{f['status']}: {f['ref']}" for f in c["findings"]
                if f["severity"] in ("error", "unknown")]
         if bad:
-            out[it["name"]] = bad
+            out[name] = bad
     return out
 
 
 def cmd_plan(args) -> None:
     ledger = load_ledger(args.ledger)
     snap = load_snapshots(args.snapshot)
-    blocked = blocked_names(args.check)
+    blocked = gate_reasons(args.check, ledger)
     by_id = {c["context_id"]: c for c in snap}
     by_name: dict[str, list[dict]] = {}
     for c in snap:
         by_name.setdefault(c["name"], []).append(c)
 
     actions, linked = [], set()
+    # context_id で紐づいている context は、名前による紐づけの候補から外す（別項目に奪わせない）
+    claimed = {it["context_id"] for it in ledger["items"]
+               if it.get("context_id") in by_id}
+    names_in_ledger = {item_name(it) for it in ledger["items"]}
 
     def push_write(action: dict, name: str) -> dict:
         if name in blocked:
             return {**action, "action": "blocked", "blocked_action": action["action"],
-                    "reason": "点検で error / unknown がある。参照を直してから同期する",
+                    "reason": "機械ゲートで止めた。理由を直してから同期する",
                     "findings": blocked[name]}
         return action
 
@@ -515,7 +600,8 @@ def cmd_plan(args) -> None:
                             "reason": "台帳の contextId が Knowledge に無い（外部で削除された可能性）。作り直すかは確認する"})
             continue
         if not k:
-            cands = by_name.get(name, [])
+            cands = [c for c in by_name.get(name, [])
+                     if c["context_id"] not in claimed and c["context_id"] not in linked]
             if len(cands) > 1:
                 ids = [c["context_id"] for c in cands]
                 linked.update(ids)
@@ -529,7 +615,6 @@ def cmd_plan(args) -> None:
                                            "scope": scope[0], "target_node_id": scope[1]}, name))
                 continue
             k = cands[0]
-            it["context_id"] = k["context_id"]  # 名前で紐づけた（write-back 時に保存）
         linked.add(k["context_id"])
 
         dims = {
@@ -538,6 +623,8 @@ def cmd_plan(args) -> None:
             "name": three_way(name, k["name"], it.get("synced_name")),
             "scope": three_way(item_scope(it), k["scope"], it.get("synced_scope")),
         }
+        if dims["name"] == "pull" and k["name"] in names_in_ledger:
+            dims["name"] = "conflict"  # 取り込むと台帳の別項目と同じ名前になる
         base = {"name": name, "context_id": k["context_id"]}
         conflicts = [d for d, v in dims.items() if v == "conflict"]
         if conflicts:
@@ -567,6 +654,7 @@ def cmd_plan(args) -> None:
         if not push and not pull:
             actions.append({**base, "action": "unchanged"})
         if args.write_back:
+            it["context_id"] = k["context_id"]  # 名前で紐づけた項目もここで固定する
             # Knowledge が正本。pull は台帳に取り込み、一致した次元は同期済みとして記録する
             if "statements" in pull:
                 set_statements(it, k["statements"])
@@ -619,13 +707,16 @@ def main():
     p.add_argument("--text-file", action="append", help="スキル等の Markdown（複数可）")
     p.add_argument("--catalog", help="照合に使うカタログ JSON（省略時は Metadata API から読む）")
     p.add_argument("--save-catalog", help="読んだカタログを保存する（再実行・オフライン用）")
+    p.add_argument("--previous-catalog",
+                   help="前回保存したカタログ。--text-file で、前回はあった名前の改名・削除を検出する")
     p.add_argument("--out", required=True)
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("plan", help="台帳と Knowledge のスナップショットから同期計画を作る")
     p.add_argument("--ledger", required=True)
     p.add_argument("--snapshot", action="append", required=True, help="複数可（分けて読んだ list）")
-    p.add_argument("--check", help="check の結果。error / unknown のある項目の create / update を blocked にする")
+    p.add_argument("--check", required=True,
+                   help="台帳に対する check の結果（機械ゲート）。error / unknown・未点検・点検後の変更がある項目を blocked にする")
     p.add_argument("--out", required=True)
     p.add_argument("--write-back", action="store_true",
                    help="contextId と同期済みの値（synced_*）、pull の取り込みを台帳に保存する")

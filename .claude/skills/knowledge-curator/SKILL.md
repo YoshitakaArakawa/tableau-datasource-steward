@@ -27,6 +27,7 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 - [ ] 足す文が BP の4種（bp-format の「BP に置くもの」）に当たるか確かめる。説明・既定の集計・calc で表せるものは BP にせず、理由を付けて報告に回す
 - [ ] bp-format の書式に整える（英語の statement、`in` で修飾したバッククォートの名前、`name` の kind 接頭辞）
 - [ ] 訳（`translation`）と理由（`rationale`）を添えて台帳に入れる
+- [ ] `name` が台帳の既存項目と重なったら、bp-format の「名前の衝突」に従う（同じ文面なら足さない。違う文面なら名前を区別する）
 - [ ] `python ${CLAUDE_SKILL_DIR}/scripts/knowledge_ledger.py refs --ledger <台帳> --write-back` で `depends_on` を更新する
 - [ ] モード3の点検を台帳に対して回し、error が無いことを確かめてから同期する
 
@@ -54,8 +55,8 @@ Tableau Knowledge の Business Preference（BP）を、台帳・同期・点検�
 
 進捗:
 - [ ] `python scripts/tableau_auth.py status`（リポジトリ直下）で cached session を確認する
-- [ ] `knowledge_ledger.py check --ledger <台帳> [--text-file <スキル.md> ...] --save-catalog <catalog.json> --out <check.json>` を実行する。台帳が無ければ、モード2の手順でスナップショットを取り、`init` で台帳を作ってから回す
-- [ ] `--text-file` で渡した Markdown は、fenced code と二重バッククォートの例示を除き、実在する名前・glob に一致した引用と `` `X` in `Y` `` だけを参照として扱う（コマンドやパスの引用は無視される）
+- [ ] `knowledge_ledger.py check --ledger <台帳> [--text-file <スキル.md> ...] --save-catalog work/<yyyymmdd>_<tag>/catalog.json [--previous-catalog <前回の catalog.json>] --out <check.json>` を実行する。台帳が無ければ、モード2の手順でスナップショットを取り、`init` で台帳を作ってから回す。カタログは毎回保存し、次回の `--previous-catalog` に渡す
+- [ ] `--text-file` で渡した Markdown は、名前とコマンド・パスの引用を区別できないので緩く扱う。改名・削除を検出できるのは、`` `X` in `Y` `` の形と、`--previous-catalog` にあって今は無い名前だけ。前回のカタログが無い初回は、単独の名前の参照切れを検出できない
 - [ ] error（`missing_datasource` / `missing_field` / `unresolved`）は、改名先の候補を Metadata API の結果か `query-knowledge-context`（`intent: ground` のノード検索）で探し、修正案を付ける
 - [ ] unknown（`unknown_fields`）は、保存済みカタログにフィールドが無く判定できなかったもの。オンラインで再実行する
 - [ ] warning は bp-format の「点検結果の意味」に従って直し方を付ける。`ambiguous_field` は、どちらの列を指すつもりかを文脈から推定して示す

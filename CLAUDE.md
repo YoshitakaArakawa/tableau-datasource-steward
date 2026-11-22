@@ -9,7 +9,7 @@ Tableau Knowledge の Business Preference（どう使うか）の整備と参照
 
 | Skill | 系統 | 責務 |
 |---|---|---|
-| `datasource-inspector` | READ | PDS のスキーマ・メタデータ・既存 calc を GraphQL 1 クエリで棚卸しし、整備 gap を洗い出す（既存 desc 全文・grain・擬似列除外・skip 候補付き） |
+| `datasource-inspector` | READ | PDS のスキーマ・メタデータ・既存 calc・既定の集計を GraphQL で棚卸しし、整備 gap を洗い出す（既存 desc 全文・grain・擬似列除外・skip 候補付き） |
 | `datasource-describer` | ANALYZE | 列・calc・datasource（grain）の説明草案を作り、既存 desc・grain が現データに適切かも検証（valid/stale）。出所付きで change-set 化 |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc を検出し hoist 候補（+ WB 側 desc・コメント込み formula）を出す |
 | `datasource-augmenter` | WRITE | change-set を受けて PDS メタデータを書き込む。source 列 desc は Catalog in-place、field desc / grain は desc-only Overwrite（ゲート付き）、calc は CreateNew publish。いずれも機械検証まで |
@@ -42,7 +42,7 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 2. `datasource-inspector`（`read_schema.py`）→ `datasource-describer` で説明草案を作り、**source 列経路の updates** と **republish 経路の change-set** に振り分ける（1:1 対応は inspector の `upstream_1to1` と augmenter の `resolve` が判定）。既存 desc の `misplaced` は「それは何か」だけ残す修正草案にし、切り出した使い方は `bp_candidates[]`、既定の集計の不一致は `structure_findings[]` に出す
 3. 書き込み（**バッチ実行の宣言 1 回で自走。per-PDS の事前確認は置かない**）。**BP を先に、説明を後に書く**:
    1. `bp_candidates[]` → `knowledge-curator` で台帳に足し、Knowledge に同期する（create / update は同じ宣言で自走。点検の error / unknown がある項目は `blocked` で書かない。delete は承認必須）
-   2. `misplaced` の修正草案のうち、`moved_to` の BP がすべて同期後のスナップショットで確認できたものだけを残す。残らなかったものは change-set から外し、報告で原文と理由を示す
+   2. `misplaced` の修正草案のうち、`moved_to` の BP がすべて同期後のスナップショットで確認できたものだけを残す。残らなかったものは change-set から外し、報告で原文と理由を示す。`aggregation_mismatch` の列の集計の文は消さない。`drop` だけの `misplaced` は自走せず確認に回す
    3. source 列 desc → `update_source_column_descs.py apply`（in-place。PDS を作らない・触らない）
    4. field desc / grain → `batch_augment.py run`（desc-only Overwrite。preflight + diff ゲート + LUID 検証を各 PDS で機械適用、manifest で再開可能）
    5. 書き込みの後に `knowledge-curator` の点検を回し、BP の参照切れと二重定義を確かめる

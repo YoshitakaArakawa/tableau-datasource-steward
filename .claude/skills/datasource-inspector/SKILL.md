@@ -1,6 +1,6 @@
 ---
 name: datasource-inspector
-description: Published Data Source のスキーマとメタデータを読み取り、整備状況（説明あり/なしの列、role、既定の集計、既存 calculated field、grain）を把握する読取専用 Skill。Metadata API (GraphQL) 1 クエリで列・calc・grain を一括棚卸しし、論理テーブル由来の擬似列の除外と説明対象外（hidden・定数 calc 等）の skip 候補分類まで行う。データソースの現状を棚卸ししたい、どの列に説明が無いか調べたい、calc を追加する前に既存定義を確認したいときに使う。出力は describer / augmenter の入力になる。
+description: Published Data Source のスキーマとメタデータを読み取り、整備状況（説明あり/なしの列、role、既定の集計、既存 calculated field、grain）を把握する読取専用 Skill。Metadata API (GraphQL) で列・calc・grain を一括棚卸しし、論理テーブル由来の擬似列の除外と説明対象外（hidden・定数 calc 等）の skip 候補分類まで行う。データソースの現状を棚卸ししたい、どの列に説明が無いか調べたい、calc を追加する前に既存定義を確認したいときに使う。出力は describer / augmenter の入力になる。
 ---
 
 # datasource-inspector
@@ -9,7 +9,7 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 ## 読取経路
 
-- **主経路は Metadata API (GraphQL)**。`read_schema.py` が列（name / dataType / role / isHidden / description / 既定の集計 / upstream 1:1）・既存 calc（formula / description）・grain（datasource description）を 1 クエリで返す。バッチで安定し、per-PDS の往復が無い。
+- **主経路は Metadata API (GraphQL)**。`read_schema.py` が列（name / dataType / role / isHidden / description / 既定の集計 / upstream 1:1）・既存 calc（formula / description）・grain（datasource description）を 1 クエリで返す（サーバーが `aggregation` を拒否したときだけ、外して 1 回取り直す）。バッチで安定し、per-PDS の往復が無い。
 - **MCP `get-datasource-metadata` は補完**。`default_aggregation_available: false`（サーバーが GraphQL の `aggregation` を返さない）ときなど、GraphQL で取れない属性が必要なときだけ呼ぶ。並列呼び出しで断続的に 401 を返すことがあるため、バッチの主経路にしない。
 - GraphQL は論理テーブル自体を ColumnField として数える（名前が upstream テーブル名と一致し upstream 列を持たない擬似列）。`read_schema.py` が除外して `pseudo_table_fields_excluded` に記録する。
 
@@ -48,4 +48,4 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 | スクリプト | 役割 |
 |---|---|
-| `scripts/read_schema.py` | Metadata API 1 クエリで列・既存 calc・grain を棚卸しし、擬似列の除外と skip 候補の分類まで行って `schema.json` に出力 |
+| `scripts/read_schema.py` | Metadata API で列・既存 calc・既定の集計・grain を棚卸しし、擬似列の除外と skip 候補の分類まで行って `schema.json` に出力 |
