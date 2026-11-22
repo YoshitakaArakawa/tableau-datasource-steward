@@ -2,10 +2,13 @@
 
 Tableau Server / Tableau Cloud の **Published Data Source (PDS)** を、組織のセマンティックレイヤーとして継続メンテナンスする Agent です。列の説明・粒度（grain）・計算フィールドといったメタデータの整備を、Claude Code 上の Skill 群が Tableau API 経由で肩代わりします。
 
-できることは大きく 2 つです。
+できることは大きく 3 つです。
 
 - **メタデータ整備バッチ**: 説明の無い列や、現データと合わなくなった既存説明を検出し、草案を生成して PDS に一括反映する。反映後は、ライブカタログを読み直した HTML レポートで「実際に何が入ったか」を網羅確認できる
 - **計算フィールドの集約（hoist）**: 複数 workbook に重複するローカル計算フィールドを検出して PDS へ寄せ、説明も付けた上で、下流 workbook を書き換えて前後の view 描画を並置比較する
+- **Tableau Knowledge の整備と点検**: 「どう使うか」の決まり（Business Preference）を台帳で管理して Knowledge に同期し、データソースの改名・削除で BP の参照が切れていないかを点検する
+
+説明には「それは何か」だけを書き、「どう使うか」は Knowledge に置く、という規範で両者を分けます。詳細は [CLAUDE.md](CLAUDE.md) の横断ポリシーにあります。
 
 ## 背景
 
@@ -43,15 +46,16 @@ Tableau の Published Data Source は、実質的に組織のセマンティッ�
 
 ## 構成
 
-中核ロジックは `.claude/skills/` 配下の 5 Skill に分かれ、ルーティングと横断ポリシーは orchestrator（[CLAUDE.md](CLAUDE.md)）が担います。データは「読取・提案（副作用なし）→ change-set → write」の一方向に流れます。write は PDS 向けと workbook 向けの 2 Skill だけです。
+中核ロジックは `.claude/skills/` 配下の 6 Skill に分かれ、ルーティングと横断ポリシーは orchestrator（[CLAUDE.md](CLAUDE.md)）が担います。データは「読取・提案（副作用なし）→ change-set → write」の一方向に流れます。write は PDS 向け・workbook 向け・Knowledge 向けの 3 Skill だけです。
 
 | Skill | 系統 | 役割 |
 |---|---|---|
 | `datasource-inspector` | READ | PDS の現状棚卸し（列・既存 calc・grain・説明カバレッジ） |
-| `datasource-describer` | ANALYZE | 説明草案の生成と既存説明の検証（valid / stale） |
+| `datasource-describer` | ANALYZE | 説明草案の生成、既存説明の検証（valid / stale / misplaced）、使い方の文を BP 候補へ振り分け |
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc 検出 |
 | `datasource-augmenter` | WRITE | change-set の注入・publish・round-trip 検証 |
 | `workbook-rewirer` | WRITE | 下流 workbook の PDS 付け替え・calc 参照差し替え・view 描画検証 |
+| `knowledge-curator` | WRITE | Knowledge の Business Preference の台帳管理・同期、参照切れと二重定義の点検 |
 
 各 Skill の詳細な責務分担は [CLAUDE.md](CLAUDE.md) の Skill マップを正とします。
 
@@ -74,6 +78,7 @@ Tableau の Published Data Source は、実質的に組織のセマンティッ�
 | PDS のフィールド説明・grain | desc-only republish。差分が説明のみであることを publish 前に XML 比較で証明し、publish 後は ID (LUID) の維持と説明の読み戻し一致（round-trip）を検証。ゲートを 1 つでも通らなければ publish しない |
 | 計算フィールドの注入 | `CreateNew` で別名 draft を作る。本番反映（promote = Overwrite）は承認必須 |
 | workbook の書き換え | 既定 `CreateNew` で rewired 版を作る。本番 workbook の Overwrite は承認必須 |
+| Knowledge の Business Preference | Tableau MCP の `manage-knowledge-context` で作成・更新。削除は承認必須 |
 
 draft には `…__augmented` / `…__rewired` のような接尾辞を付け、正式版と誤認されないようにします。承認ゲートの範囲や自走時の報告義務など、詳細は [CLAUDE.md](CLAUDE.md) の横断ポリシーを正とします。
 
@@ -94,7 +99,7 @@ cp .env.template .env   # SERVER / SITE_NAME を実値に差し替え（.env は
 
 サンプル値の取得などで Tableau MCP を使います。MCP サーバーの接続設定は、利用者の Claude 環境側で用意してください（connector / user スコープ等）。project スコープで設定したい場合の例として、PAT/npx 版の `.mcp.json.template` を同梱しています（`.mcp.json` にコピーして実値を差し替え。`.mcp.json` は gitignore 済み）。
 
-Skill 側が前提にするのは、datasource 読取ツール（`get-datasource-metadata` / `query-datasource` / `list-datasources` 等）を提供する MCP サーバーが利用可能であることだけです。ツールは基底名で参照するため、サーバー名には依存しません。
+Skill 側が前提にするのは、datasource 読取ツール（`get-datasource-metadata` / `query-datasource` / `list-datasources` 等）を提供する MCP サーバーが利用可能であることだけです。Knowledge の整備には、Knowledge ツール（`inspect-knowledge-context` / `manage-knowledge-context` / `query-knowledge-context`）と Tableau+ が要ります。ツールは基底名で参照するため、サーバー名には依存しません。
 
 ## スコープと命名
 

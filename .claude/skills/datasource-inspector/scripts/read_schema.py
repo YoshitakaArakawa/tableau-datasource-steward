@@ -1,10 +1,10 @@
 """PDS のスキーマ棚卸しを Metadata API (GraphQL) 1 クエリで取得する。
 
 列（name / dataType / role / isHidden / description / upstream 1:1）・既存 calc
-（formula / description）・datasource description（grain）・擬似列の除外・skip 候補
-の分類までを一括で行う。MCP get-datasource-metadata は並列呼び出しで不安定
-（断続 401）なため、列メタもここに寄せ、MCP は defaultAggregation とサンプル値の
-補完に限定する。
+（formula / description）・既定の集計（aggregation）・datasource description（grain）・
+擬似列の除外・skip 候補の分類までを一括で行う。MCP get-datasource-metadata は並列
+呼び出しで不安定（断続 401）なため、列メタもここに寄せ、MCP はサンプル値と、
+aggregation を GraphQL で取れなかったときの補完に限定する。
 
 usage:
     python read_schema.py --pds-luid <luid> [--out schema.json]
@@ -36,7 +36,7 @@ sys.path.insert(0, str(_find_repo_scripts()))
 from tableau_auth import signed_in_server  # noqa: E402  (OAuth)
 from metadata_api import graphql  # noqa: E402
 
-Q = """
+Q_TEMPLATE = """
 query($l:String!){
   publishedDatasources(filter:{luid:$l}){
     name luid description
@@ -44,14 +44,30 @@ query($l:String!){
     fields{
       name __typename description isHidden
       ... on ColumnField{
-        dataType role
+        dataType role AGG
         upstreamColumns{ luid table{ __typename name ... on DatabaseTable { luid } } }
       }
-      ... on CalculatedField{ formula dataType role }
+      ... on CalculatedField{ formula dataType role AGG }
     }
   }
 }
 """
+Q_WITH_AGG = Q_TEMPLATE.replace("AGG", "aggregation")
+Q_NO_AGG = Q_TEMPLATE.replace(" AGG", "")
+
+
+def fetch(server, luid: str) -> tuple[list, bool]:
+    """aggregation 付きで取得し、サーバーが属性を拒否したら外して取り直す。
+
+    戻り値の bool は aggregation を取得できたか。取れなければ MCP
+    get-datasource-metadata で補完する（Skill 本文のワークフロー）。
+    """
+    try:
+        return graphql(server, Q_WITH_AGG, {"l": luid})["publishedDatasources"], True
+    except RuntimeError as e:
+        if "aggregation" not in str(e):
+            raise
+        return graphql(server, Q_NO_AGG, {"l": luid})["publishedDatasources"], False
 
 # 定数だけの formula（"1", "1.0" 等）。`Number of Records` 相当の legacy calc の目印
 _CONST_FORMULA = re.compile(r"^\s*-?\d+(\.\d+)?\s*$")
@@ -79,7 +95,7 @@ def main():
     args = ap.parse_args()
 
     with signed_in_server() as server:
-        res = graphql(server, Q, {"l": args.pds_luid})["publishedDatasources"]
+        res, agg_available = fetch(server, args.pds_luid)
     if not res:
         raise SystemExit(f"PDS not found: {args.pds_luid}")
     ds = res[0]
@@ -101,7 +117,8 @@ def main():
                                     "reason": skip})
         entry = {"name": f["name"], "dataType": f.get("dataType"),
                  "role": f.get("role"), "isHidden": f.get("isHidden"),
-                 "description": f.get("description") or None}
+                 "description": f.get("description") or None,
+                 "defaultAggregation": f.get("aggregation")}
         if f["__typename"] == "CalculatedField":
             calcs.append({**entry, "formula": f.get("formula")})
         elif f["__typename"] == "ColumnField":
@@ -126,6 +143,8 @@ def main():
         "column_count": len(columns), "calc_count": len(calcs),
         "columns": columns, "calcs": calcs,
         "pseudo_table_fields_excluded": pseudo,
+        # False のとき defaultAggregation は全件 None。MCP で補完する
+        "default_aggregation_available": agg_available,
         "skip_candidates": skip_candidates,
         "gap": gap,
     }
@@ -136,6 +155,7 @@ def main():
     summary = {k: out[k] for k in ("pds_name", "column_count", "calc_count")}
     summary["undescribed"] = (len(gap["undescribed_columns"]), len(gap["undescribed_calcs"]))
     summary["grain_missing"] = gap["grain_missing"]
+    summary["default_aggregation_available"] = agg_available
     print("RESULT_JSON:", json.dumps(summary, ensure_ascii=False))
 
 

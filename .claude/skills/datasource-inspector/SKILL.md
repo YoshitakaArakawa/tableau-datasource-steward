@@ -1,6 +1,6 @@
 ---
 name: datasource-inspector
-description: Published Data Source のスキーマとメタデータを読み取り、整備状況（説明あり/なしの列、role、既存 calculated field、grain）を把握する読取専用 Skill。Metadata API (GraphQL) 1 クエリで列・calc・grain を一括棚卸しし、論理テーブル由来の擬似列の除外と説明対象外（hidden・定数 calc 等）の skip 候補分類まで行う。データソースの現状を棚卸ししたい、どの列に説明が無いか調べたい、calc を追加する前に既存定義を確認したいときに使う。出力は describer / augmenter の入力になる。
+description: Published Data Source のスキーマとメタデータを読み取り、整備状況（説明あり/なしの列、role、既定の集計、既存 calculated field、grain）を把握する読取専用 Skill。Metadata API (GraphQL) 1 クエリで列・calc・grain を一括棚卸しし、論理テーブル由来の擬似列の除外と説明対象外（hidden・定数 calc 等）の skip 候補分類まで行う。データソースの現状を棚卸ししたい、どの列に説明が無いか調べたい、calc を追加する前に既存定義を確認したいときに使う。出力は describer / augmenter の入力になる。
 ---
 
 # datasource-inspector
@@ -9,8 +9,8 @@ description: Published Data Source のスキーマとメタデータを読み取
 
 ## 読取経路
 
-- **主経路は Metadata API (GraphQL)**。`read_schema.py` が列（name / dataType / role / isHidden / description / upstream 1:1）・既存 calc（formula / description）・grain（datasource description）を 1 クエリで返す。バッチで安定し、per-PDS の往復が無い。
-- **MCP `get-datasource-metadata` は補完**。defaultAggregation 等 GraphQL に無い属性が必要なときだけ呼ぶ。並列呼び出しで断続的に 401 を返すことがあるため、バッチの主経路にしない。
+- **主経路は Metadata API (GraphQL)**。`read_schema.py` が列（name / dataType / role / isHidden / description / 既定の集計 / upstream 1:1）・既存 calc（formula / description）・grain（datasource description）を 1 クエリで返す。バッチで安定し、per-PDS の往復が無い。
+- **MCP `get-datasource-metadata` は補完**。`default_aggregation_available: false`（サーバーが GraphQL の `aggregation` を返さない）ときなど、GraphQL で取れない属性が必要なときだけ呼ぶ。並列呼び出しで断続的に 401 を返すことがあるため、バッチの主経路にしない。
 - GraphQL は論理テーブル自体を ColumnField として数える（名前が upstream テーブル名と一致し upstream 列を持たない擬似列）。`read_schema.py` が除外して `pseudo_table_fields_excluded` に記録する。
 
 ## ワークフロー
@@ -19,7 +19,7 @@ description: Published Data Source のスキーマとメタデータを読み取
 - [ ] `python scripts/tableau_auth.py status` で cached session を確認（`no cached session` なら先にサインインを依頼）
 - [ ] 対象 PDS の LUID を確認（無ければ `list-datasources` で名前から特定）
 - [ ] `read_schema.py --pds-luid <luid> --out schema.json` を実行
-- [ ] defaultAggregation が必要な場合のみ `get-datasource-metadata` で補完
+- [ ] `default_aggregation_available` が false なら、measure の既定の集計を `get-datasource-metadata` で補完する
 - [ ] 棚卸しレポートを書く：grain の現在値、説明あり/なしの列（既存 desc は**全文**）、role、既存 calc 一覧、skip 候補
 - [ ] メタデータ欠落（`gap`: description 未設定の列・calc、grain 未設定）を明示
 
@@ -28,8 +28,9 @@ description: Published Data Source のスキーマとメタデータを読み取
 `read_schema.py` の `schema.json` に以下が含まれる:
 
 - **`datasource_description`（grain）の現在値**（None/空 = 未設定）
-- `columns[]`：name / dataType / role / isHidden / **description（全文）** / upstream_1to1（source 列経路が使えるかの目印）
-- `calcs[]`：name / formula / **description（全文）**
+- `columns[]`：name / dataType / role / isHidden / **description（全文）** / defaultAggregation / upstream_1to1（source 列経路が使えるかの目印）
+- `calcs[]`：name / formula / **description（全文）** / defaultAggregation
+- `default_aggregation_available`：GraphQL で既定の集計を取得できたか
 - `pseudo_table_fields_excluded[]`：分母から除外した論理テーブル擬似列
 - `skip_candidates[]`：説明対象外の**候補**（hidden フィールド・定数 calc・単純エイリアス calc）。理由付き。採否は describer / ユーザーが判断する
 - `gap`：description 未設定の列・calc（skip 候補は除く）、grain 未設定

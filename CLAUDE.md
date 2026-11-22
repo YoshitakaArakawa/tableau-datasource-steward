@@ -1,7 +1,8 @@
 # tableau-datasource-steward — オーケストレーション指針
 
 このリポジトリは、Tableau Server / Tableau Cloud 上の **Published Data Source (PDS)** を
-セマンティックレイヤーとして継続メンテする Agent。中核ロジックは `.claude/skills/` の複数 Skill に分かれ、
+セマンティックレイヤーとして継続メンテする Agent。PDS のメタデータ（それは何か）に加え、
+Tableau Knowledge の Business Preference（どう使うか）の整備と参照切れの点検も担う。中核ロジックは `.claude/skills/` の複数 Skill に分かれ、
 本ファイルが orchestrator（ルーティングと横断ポリシー）を担う。
 
 ## Skill マップ
@@ -13,8 +14,9 @@
 | `workbook-calc-prospector` | ANALYZE | 下流 workbook の重複 calc を検出し hoist 候補（+ WB 側 desc・コメント込み formula）を出す |
 | `datasource-augmenter` | WRITE | change-set を受けて PDS メタデータを書き込む。source 列 desc は Catalog in-place、field desc / grain は desc-only Overwrite（ゲート付き）、calc は CreateNew publish。いずれも機械検証まで |
 | `workbook-rewirer` | WRITE | hoist 後の workbook を書き換え（PDS 付け替え + calc 参照差し替え）→ publish → view 描画検証 |
+| `knowledge-curator` | WRITE | Knowledge の Business Preference（BP）の台帳管理、`manage-knowledge-context` での作成・更新、参照切れ・二重定義の点検（点検は読取専用） |
 
-データの流れ: inspector / describer / prospector（読取・提案、副作用なし）→ change-set → **augmenter（PDS への write）** → **rewirer（workbook への write）**。write はこの 2 Skill のみ。
+データの流れ: inspector / describer / prospector（読取・提案、副作用なし）→ change-set → **augmenter（PDS への write）** → **rewirer（workbook への write）**。describer の `bp_candidates[]` は → **knowledge-curator（Knowledge への write）**。write はこの 3 Skill のみ。
 
 「何を触るときにどの Skill を使うか」は本ファイル（Skill マップとルーティング）を正とし、**Skill 本文には他 Skill への routing 参照を書かない**（スコープ除外は行き先なしで書く）。Skill 側に書いてよいのは入出力契約まで（spec のフィールドがどの Skill の成果物由来か、実行手順上どの Skill の出力を前提にするか）。
 
@@ -26,6 +28,9 @@
 - 「共通の計算を PDS に寄せたい / 重複 calc を探す」→ `workbook-calc-prospector`
 - 「説明 / calc を実際に PDS へ反映したい」→ `datasource-augmenter`
 - 「寄せた calc を workbook で実際に使わせたい / workbook のデータソースを付け替えたい / rewired 版で動作確認したい」→ `workbook-rewirer`
+- 「説明に紛れた使い方を切り分けたい」→ `datasource-describer`（検証モードの `misplaced`）
+- 「Business Preference を登録・更新したい / BP 台帳を Knowledge と同期したい」→ `knowledge-curator`
+- 「BP やスキルの参照切れ・説明との二重定義を点検したい」→ `knowledge-curator`（点検モード）
 
 Skill の作成・変更時は、着手前に `creating-skills` を参照する。
 
@@ -34,12 +39,20 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 ユーザーが対象範囲（project / PDS 名）を指定して回す自走バッチ。発見性（MCP / VDS が読む description）の整備が目的。
 
 1. **コスト見積もりゲート**: `scripts/batch_augment.py estimate` で per-PDS の「source 列経路で埋まる数 / republish 必至の数 / extract 総量」を算出。`heavy` なら「全部やると大変」を提示して対象の絞り直しを促す
-2. `datasource-inspector`（`read_schema.py`）→ `datasource-describer` で説明草案を作り、**source 列経路の updates** と **republish 経路の change-set** に振り分ける（1:1 対応は inspector の `upstream_1to1` と augmenter の `resolve` が判定）
+2. `datasource-inspector`（`read_schema.py`）→ `datasource-describer` で説明草案を作り、**source 列経路の updates** と **republish 経路の change-set** に振り分ける（1:1 対応は inspector の `upstream_1to1` と augmenter の `resolve` が判定）。既存 desc の `misplaced` は「それは何か」だけ残す修正草案にし、切り出した使い方は `bp_candidates[]`、既定の集計の不一致は `structure_findings[]` に出す
 3. 書き込み（**バッチ実行の宣言 1 回で自走。per-PDS の事前確認は置かない**）:
    - source 列 desc → `update_source_column_descs.py apply`（in-place。PDS を作らない・触らない）
    - field desc / grain → `batch_augment.py run`（desc-only Overwrite。preflight + diff ゲート + LUID 検証を各 PDS で機械適用、manifest で再開可能）
+   - `bp_candidates[]` → `knowledge-curator` で台帳に足し、Knowledge に同期（create / update は同じ宣言で自走。delete は承認必須）
+   - 書き込みの後に `knowledge-curator` の点検を回し、BP の参照切れと二重定義を確かめる
 4. **成果物レビュー面の生成**: 反映後に `scripts/metadata_report.py --projects <対象>` で**ライブカタログを読み直した** HTML レポート（per-PDS の grain + 全列 description + coverage 集計）を生成し、報告に添える。ユーザーが Tableau GUI を巡回せずに「実際に何が入ったか」を網羅確認できる面を必ず用意する（書いた spec ではなく読み直した実物を示す）
-5. **orchestrator 報告**: 本文は**要約と判断点のみ**（verified 集計、gate_failed / abort の理由、`inferred` で確信度の低いもの、rollback 手順、レビュー面への参照）。全 luid・全変更の一覧は `work/` にファイル出力し、本文に列挙しない。折りたたみ目的で HTML `<details>` を使わない（ターミナルの Markdown では描画されない）
+5. **orchestrator 報告**: 本文は**要約と判断点のみ**（verified 集計、gate_failed / abort の理由、`inferred` で確信度の低いもの、`misplaced` で説明から移した文と行き先、BP の create / update 件数と点検の error、`structure_findings`（既定の集計は現状は指摘のみ）、rollback 手順、レビュー面への参照）。全 luid・全変更の一覧は `work/` にファイル出力し、本文に列挙しない。折りたたみ目的で HTML `<details>` を使わない（ターミナルの Markdown では描画されない）
+
+## ワークフロー：Knowledge の BP を整備・点検する
+
+1. `knowledge-curator`（台帳モード）で BP を台帳に足す・直す。説明・既定の集計・calc で表せる文は BP にしない
+2. `knowledge-curator`（同期モード）で Knowledge のスナップショットと3方向比較し、create / update を `manage-knowledge-context` で反映する。`conflict` / `orphan` は報告に回す
+3. **データソースの発行・上書きの直後**（augmenter の Overwrite・promote の後）と**定期実行**で、点検モードを回す。改名・削除で切れた参照を修正案付きで報告する
 
 ## ワークフロー：重複 calc を寄せて説明も付ける
 
@@ -59,6 +72,19 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 
 ## 横断ポリシー
 
+### メタデータとコンテキストを分ける
+
+| 層 | 答える問い | 置き場 |
+|---|---|---|
+| メタデータ層 | それは何か | PDS の構造（calc・既定の集計・名前・関係）と説明（列・calc・grain） |
+| コンテキスト層 | どう使うか | 組織で共有する決まりは Knowledge の BP。データに依らないエージェントの作法はスキル（steward の書き込み対象外。参照切れの点検だけ扱う） |
+
+1. **判定**: その文は、問う人・問い・場面が変わっても真か。真ならメタデータ、変わりうるならコンテキスト。
+2. **依存は一方向**: コンテキストはメタデータを名前で参照してよい。メタデータはコンテキストを参照しない。
+3. **一か所で定義する**: 同じ語を両方の層で定義しない。
+
+置き場所の優先順は **構造 → 説明 → 例 → 文の指示（BP）**。この規範は Tableau 公式（説明に典型的な使い方も書く）より厳しい。説明だけを読むエージェントに使い方が届かない代償は、構造を先にすることで小さくする。判定表は describer の `references/placement-rules.md`、BP の書式は knowledge-curator の `references/bp-format.md` を正とする。
+
 ### 書き込み方式（DM/Catalog 有効を前提とする）
 
 | 対象 | 方式 | 承認 |
@@ -68,17 +94,20 @@ Skill の作成・変更時は、着手前に `creating-skills` を参照する�
 | calc 注入 | `CreateNew` で別名 draft（例 `…__augmented`）を作る | draft 作成は自走可。本番反映（promote）は承認必須 |
 | 内容変更を伴う Overwrite（promote 含む） | 破壊的（下流 workbook を巻き込みうる） | **明示要求 + 影響の提示 + ユーザー承認** |
 | workbook（rewirer） | 既定 `CreateNew`（rewired 版）。本番 WB の Overwrite は破壊的 | draft 作成は自走可。本番 Overwrite は承認必須 |
+| Knowledge の BP | Tableau MCP `manage-knowledge-context` のみ。draft は無く、書いた時点で全員に効く | create / update はバッチ宣言 1 回で自走可（事後報告に contextId と取り消し手順を載せる）。delete は対象を示して承認必須 |
 
 desc-only Overwrite が準非破壊と言えるのは、人間の目視承認を機械証明に置き換えているため: 差分が `<desc>` に限られることを publish 前に XML 比較で証明し、LUID 維持・grain 継承・round-trip を事後検証する。ゲートを 1 つでも通らなければ publish しない。
 
 ### 承認ゲート
-- 破壊的操作（**内容変更を伴う Overwrite publish（PDS / workbook）、PDS・workbook の削除、promote**）の前は必ずユーザー確認。真のゲートはここ。削除は `cleanup_drafts.py`（name 接尾辞 ∧ project の二重ガード、dry-run 既定）を標準手段とする。
+- 破壊的操作（**内容変更を伴う Overwrite publish（PDS / workbook）、PDS・workbook の削除、promote、Knowledge の context の削除**）の前は必ずユーザー確認。真のゲートはここ。削除は `cleanup_drafts.py`（name 接尾辞 ∧ project の二重ガード、dry-run 既定）を標準手段とする。
 - `CreateNew`・desc-only Overwrite・source 列 desc・読取・change-set 生成は非破壊〜準非破壊。自走ユースケース（上記ワークフロー）では**事前プロンプトなしで実行してよい**（desc-only Overwrite はバッチ実行の宣言 1 回を先に置く）。代わりに事後の orchestrator 報告で、変更対象（name / luid / project）と rollback / 破棄手順、抽出/推論の区別を必ず提示する（confirm は write の前ではなくワークフロー末尾に束ねる）。
 - 自走時も draft と分かる命名（例 `…__augmented`、`…__rewired`）を使い、第三者が正式版と誤認しないようにする。
 
 ### 認証
 - Skill から Tableau API を叩くときは **OAuth**（`scripts/tableau_auth.py` の `signed_in_server()`）を使う。
 - 読取の主経路は Metadata API GraphQL（`scripts/metadata_api.py`）。列メタ・既存 calc・grain・lineage を一括で安定して読める。Tableau MCP はサンプル値取得（`query-datasource`）と defaultAggregation 等の補完に使う（並列呼び出しで断続 401 のためバッチの主経路にしない）。
+- **Knowledge の読み書きは Tableau MCP だけで行う**（`inspect-knowledge-context` / `manage-knowledge-context` / `query-knowledge-context`。Tableau+ が要る）。
+- **公式 MCP への移行を見越して、書き込みの経路を薄く保つ**。公式に書き込みツールがあるもの（Knowledge）は MCP に任せる。説明・既定の集計を書くツールは公式に無いので自前で持つ。PDS の発行は augmenter の `publish_tdsx()` 1 か所に閉じ、公式の `publish-datasource` が使える環境になったらそこだけを差し替える（ゲートと検証は残す）。
 - **MCP サーバーの用意（接続方式・認証）は利用者の Claude 環境側の責務**。repo は特定の接続を強制しない（project スコープで設定したい場合の例として PAT/npx 版 `.mcp.json.template` を同梱）。Skill は datasource 読取ツール（`get-datasource-metadata` / `query-datasource` / `list-datasources` 等）を提供する MCP サーバーが利用可能であることを前提にする。ツールは**サーバー名 prefix ではなく tool 名（基底名）で参照**し、環境側のサーバー名に依存しない。
 
 ### 公開前提の規範
